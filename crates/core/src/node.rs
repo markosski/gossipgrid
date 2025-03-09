@@ -1,11 +1,12 @@
+
 use std::net::{UdpSocket, SocketAddr};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH, SystemTime};
+use std::time::{Duration, UNIX_EPOCH, SystemTime};
 use bincode::{Decode, Encode};
 use rand::seq::IteratorRandom;
-use log::{debug, info, warn, error};
+use log::{info, error};
 use std::io;
 use std::cmp::max;
 use names::Generator;
@@ -27,9 +28,7 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
-fn main() {
-    env_logger::init();
-
+pub fn start_node() {
     // Generate name for this node
     let mut generator = Generator::default();
     let node_name = Arc::new(generator.next().unwrap());
@@ -63,7 +62,7 @@ fn main() {
                 Ok((size, src)) => {
                     let (received, _) = bincode::decode_from_slice::<GossipMessage, _>(&buf[..size], bincode::config::standard()).unwrap();
                     info!("node={}; received {:?} from {:?}:{:?}", node_name_receiver, received, src.ip(), src.port());
-                    if let Ok(mut peers) = peers_recv.try_lock() {
+                    if let Ok(mut peers) = peers_recv.lock() {
                         // let mut peers = peers_recv.lock().unwrap();
                         let now_millis = now_millis();
 
@@ -80,7 +79,6 @@ fn main() {
                             }
                         }
                         peers.insert(src.to_string(), now_millis); // Add sender with last seen timestamp
-                        info!("node={}; Updated peers: {:?}", node_name_receiver, peers);
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -100,7 +98,17 @@ fn main() {
     let node_name_sender = node_name.clone();
     let sender_handle = thread::spawn(move || {
         loop {
-            if let Ok(mut peers) = peers_send.try_lock() {
+            // // lock will not be released in this case
+            // let mut peers = match peers_send.lock() {
+            //     Ok(peers) => peers,
+            //     Err(poisoned) => {
+            //         error!("Gossip thread panic detected! Lock was poisoned.");
+            //         poisoned.into_inner()
+            //     }
+            // };
+
+            // lock will be released after the if block
+            if let Ok(mut peers) = peers_send.lock() {
                 let now_millis = now_millis();
                 peers.insert(local_addr.clone(), now_millis); // re-add current node
                 
@@ -123,6 +131,6 @@ fn main() {
             thread::sleep(GOSSIP_INTERVAL);
         }
     });
-    
+
     sender_handle.join().unwrap();
 }
