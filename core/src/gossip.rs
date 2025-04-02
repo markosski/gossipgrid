@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::time::{Duration, UNIX_EPOCH, SystemTime};
 use bincode::{Decode, Encode};
 use log::{info, error};
-use crate::task::Item;
+use crate::task::{Item, ItemStatus};
 use std::cmp::Ordering;
-use std::io;
-
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use std::sync::Arc;
@@ -58,6 +56,29 @@ impl NodeMemory {
             peers_hlc: HLC { timestamp: now_millis(), counter: 0 },
             tasks: [(local_addr.clone(), TaskSet { tasks: vec![], hlc: HLC { timestamp: now_millis(), counter: 0 } })].iter().cloned().collect()
         }
+    }
+
+    pub fn add_node(&mut self, node: Node) {
+        self.known_peers.insert(node.address.clone(), node);
+    }
+
+    pub fn remove_node(&mut self, node_id: &String) {
+        self.known_peers.remove(node_id);
+        self.tasks.remove(node_id);
+    }
+
+    pub fn add_item(&mut self, node_id: String, item_id: String, message: String) {
+        let item = Item { id: item_id, message: message, submitted_at: now_millis(), status: ItemStatus::Pending };
+
+        let mut new_tasks = self.tasks.get_mut(&node_id).unwrap().tasks.clone();
+        new_tasks.push(item);
+
+        let new_task_set = TaskSet { 
+            tasks: new_tasks, 
+            hlc: self.tasks.get(&node_id).unwrap().hlc.tick_hlc(now_millis()) 
+        };
+
+        self.tasks.insert(node_id.clone(), new_task_set);
     }
 
     pub fn merge_tasks(&mut self, remote: &HashMap<String, TaskSet>) {
@@ -143,9 +164,9 @@ pub async fn receive_gossip(node_name: String, socket: Arc<UdpSocket>, memory: A
                     let maybe_this_peer = memory.known_peers.get(&src.to_string());
 
                     if let Some(_) = maybe_this_peer {
-                        memory.known_peers.insert(src.to_string(), Node { address: src.to_string(), last_seen: now_millis()});
+                        memory.add_node(Node { address: src.to_string(), last_seen: now_millis()});
                     } else {
-                        memory.known_peers.insert(src.to_string(), Node { address: src.to_string(), last_seen: now_millis()});
+                        memory.add_node(Node { address: src.to_string(), last_seen: now_millis()});
                     }
 
                     // Update peers to most recent timestamp and vector clock
@@ -189,17 +210,14 @@ pub async fn send_gossip(node_name: String, local_addr: String, socket: Arc<UdpS
             let now_millis = now_millis();
             
             // Remove peers that haven't responded within FAILURE_TIMEOUT
-            let mut peers = memory.known_peers.clone();
-            for peer in memory.known_peers.iter() {
+            for peer in memory.known_peers.clone().iter() {
                 if peer.0 != &local_addr && now_millis - peer.1.last_seen > FAILURE_TIMEOUT.as_millis() as u64 {
-                    peers.remove(peer.0);
+                    memory.remove_node(peer.0);
                     info!("node={}; Removed peer: {:?} from known peers", node_name, peer.0);
                 } else if peer.0 != &local_addr {
-                    // let this_peer = memory.known_peers.get(&local_addr_sender).unwrap();
-                    peers.insert(local_addr.clone(), Node { address: peer.0.clone(), last_seen: now_millis});
+                    memory.add_node(Node { address: peer.0.clone(), last_seen: now_millis});
                 }
             }
-            memory.known_peers = peers;
 
             // List of peers without this one
             let mut other_peers = memory.known_peers.clone();

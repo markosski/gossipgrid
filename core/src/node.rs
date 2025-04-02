@@ -1,7 +1,7 @@
 use log::info;
 use names::Generator;
-use crate::task::{ Item, ItemSubmit, ItemStatus};
-use crate::gossip::{send_gossip, receive_gossip, NodeMemory, TaskSet, now_millis};
+use crate::task::{ItemSubmit, ItemSubmitResponse};
+use crate::gossip::{send_gossip, receive_gossip, NodeMemory};
 use uuid::Uuid;
 use std::net::SocketAddr;
 
@@ -17,10 +17,11 @@ pub async fn start_node(web_addr: String, local_addr: String, node_memory: Arc<M
 
     info!(name=node_name.as_str(); "node={}; Starting application: {}", &node_name, &local_addr);
 
-    // Initialize sockets
+    // Initialize socket
     let socket = Arc::new(UdpSocket::bind(&local_addr).await
         .expect("Failed to set read timeout"));
     
+    // Fire and forget gossip tasks
     let _ = tokio::spawn(send_gossip(node_name.clone(), local_addr.clone(), socket.clone(), node_memory.clone()));
     let _ = tokio::spawn(receive_gossip(node_name.clone(), socket.clone(), node_memory.clone()));
 
@@ -37,21 +38,20 @@ fn with_local_addr(local_addr: String) -> impl Filter<Extract = (String,), Error
 }
 
 async fn handle_post_task(
-    task: ItemSubmit,
+    item: ItemSubmit,
     memory: Arc<Mutex<NodeMemory>>,
     local_addr: String,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let mut memory = memory.lock().await;
-    let task_id = Uuid::new_v4();
-    let task = Item { id: task_id.to_string(), message: task.message, submitted_at: now_millis(), status: ItemStatus::Pending };
+    let item_id = Uuid::new_v4();
+    memory.add_item(local_addr.clone(), item_id.to_string(), item.message);
 
-    let mut new_tasks = memory.tasks.get_mut(&local_addr).unwrap().tasks.clone();
-    new_tasks.push(task);
+    let response = ItemSubmitResponse { 
+        success: Some(format!("Task received with id: {}", item_id)), 
+        error: None
+    };
 
-    let new_task_set = TaskSet { tasks: new_tasks, hlc: memory.tasks.get(&local_addr).unwrap().hlc.tick_hlc(now_millis()) };
-    memory.tasks.insert(local_addr.clone(), new_task_set);
-
-    Ok(warp::reply::json(&"Task received"))
+    Ok(warp::reply::json(&response))
 }
 
 async fn handle_get_tasks(
@@ -83,7 +83,8 @@ async fn web_server(local_web_addr: String, local_addr: String, memory: Arc<Mute
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use crate::gossip::HLC;
+    use crate::gossip::{HLC, TaskSet};
+    use crate::task::{Item, ItemStatus};
 
     #[test]
     fn test_merge_tasks() {

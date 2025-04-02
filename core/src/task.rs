@@ -1,5 +1,4 @@
 #![allow(unused)]
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, Duration};
@@ -16,8 +15,13 @@ pub struct Item {
 
 #[derive(Debug, Clone, Encode, Decode, Deserialize, Serialize)]
 pub struct ItemSubmit {
-    pub id: String,
     pub message: String
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ItemSubmitResponse {
+    pub success: Option<String>,
+    pub error: Option<String>
 }
 
 #[derive(Debug, Clone, Encode, Decode, Deserialize, Serialize)]
