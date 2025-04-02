@@ -174,9 +174,6 @@ pub async fn receive_gossip(node_name: String, socket: Arc<UdpSocket>, memory: A
                     });
                 }
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                sleep(Duration::from_millis(100)).await;
-            }
             Err(e) => {
                 error!("Receive error: {}", e);
             }
