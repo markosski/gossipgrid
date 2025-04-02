@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, UNIX_EPOCH, SystemTime};
 use bincode::{Decode, Encode};
 use log::{info, error};
-use crate::task::{Item, ItemStatus};
+use crate::item::{Item, ItemStatus};
 use std::cmp::Ordering;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -67,18 +67,27 @@ impl NodeMemory {
         self.tasks.remove(node_id);
     }
 
-    pub fn add_item(&mut self, node_id: String, item_id: String, message: String) {
+    pub fn add_item(&mut self, node_id: &String, item_id: String, message: String) {
         let item = Item { id: item_id, message: message, submitted_at: now_millis(), status: ItemStatus::Pending };
 
-        let mut new_tasks = self.tasks.get_mut(&node_id).unwrap().tasks.clone();
+        let mut new_tasks = self.tasks.get_mut(node_id).unwrap().tasks.clone();
         new_tasks.push(item);
 
         let new_task_set = TaskSet { 
             tasks: new_tasks, 
-            hlc: self.tasks.get(&node_id).unwrap().hlc.tick_hlc(now_millis()) 
+            hlc: self.tasks.get(node_id).unwrap().hlc.tick_hlc(now_millis()) 
         };
 
         self.tasks.insert(node_id.clone(), new_task_set);
+    }
+
+    pub fn remove_item(&mut self, node_id: &String, item_id: &String) -> bool {
+        if let Some(task_set) = self.tasks.get_mut(node_id) {
+            task_set.tasks.retain(|item| &item.id != item_id);
+            return true;
+        } else {
+            return false; // Node not found
+        }
     }
 
     pub fn merge_tasks(&mut self, remote: &HashMap<String, TaskSet>) {
