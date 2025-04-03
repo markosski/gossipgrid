@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 core = { path = "../../core" }
 env_logger = "*"
+tokio = { version = "1.0", features = ["full"] }
