@@ -60,11 +60,15 @@ impl NodeMemory {
 
     pub fn add_node(&mut self, node: Node) {
         self.known_peers.insert(node.address.clone(), node);
+        self.peers_hlc.tick_hlc(now_millis());
     }
 
     pub fn remove_node(&mut self, node_id: &String) {
-        self.known_peers.remove(node_id);
-        self.tasks.remove(node_id);
+        if self.known_peers.get(node_id).is_some() {
+            self.known_peers.remove(node_id);
+            self.tasks.remove(node_id);
+            self.peers_hlc.tick_hlc(now_millis());
+        }
     }
 
     pub fn add_item(&mut self, node_id: &String, item_id: String, message: String) {
@@ -83,7 +87,14 @@ impl NodeMemory {
 
     pub fn remove_item(&mut self, node_id: &String, item_id: &String) -> bool {
         if let Some(task_set) = self.tasks.get_mut(node_id) {
-            task_set.tasks.retain(|item| &item.id != item_id);
+            let mut new_tasks = task_set.tasks.clone();
+            new_tasks.retain(|item| &item.id != item_id);
+
+            let new_task_set = TaskSet {
+                tasks: new_tasks,
+                hlc: task_set.hlc.tick_hlc(now_millis())
+            };
+            self.tasks.insert(node_id.clone(), new_task_set);
             return true;
         } else {
             return false; // Node not found
@@ -170,13 +181,8 @@ pub async fn receive_gossip(node_name: String, socket: Arc<UdpSocket>, memory: A
                 {    
                     let mut memory = memory.lock().await;
 
-                    let maybe_this_peer = memory.known_peers.get(&src.to_string());
-
-                    if let Some(_) = maybe_this_peer {
-                        memory.add_node(Node { address: src.to_string(), last_seen: now_millis()});
-                    } else {
-                        memory.add_node(Node { address: src.to_string(), last_seen: now_millis()});
-                    }
+                    // Bump last update time
+                    memory.add_node(Node { address: src.to_string(), last_seen: now_millis()});
 
                     // Update peers to most recent timestamp and vector clock
                     let received_node_keys: Vec<&String> = received.known_peers.keys().collect();
@@ -219,27 +225,27 @@ pub async fn send_gossip(node_name: String, local_addr: String, socket: Arc<UdpS
             let now_millis = now_millis();
             
             // Remove peers that haven't responded within FAILURE_TIMEOUT
-            for peer in memory.known_peers.clone().iter() {
+            let peers = memory.known_peers.clone();
+            for peer in peers.iter() {
                 if peer.0 != &local_addr && now_millis - peer.1.last_seen > FAILURE_TIMEOUT.as_millis() as u64 {
                     memory.remove_node(peer.0);
                     info!("node={}; Removed peer: {:?} from known peers", node_name, peer.0);
-                } else if peer.0 != &local_addr {
-                    memory.add_node(Node { address: peer.0.clone(), last_seen: now_millis});
                 }
             }
 
             // List of peers without this one
-            let mut other_peers = memory.known_peers.clone();
+            let mut other_peers = peers.clone();
+            
+            // TODO: do not allow to modify hashmap
             other_peers.remove(&local_addr);
 
-            info!("node={}; Known peers: {:?}", node_name, memory.known_peers);
-            
+            info!("node={}; Known peers: {:?}", node_name, &other_peers);
             
             let vec =  Vec::from_iter(other_peers.keys().into_iter());
             if vec.len() > 0 {
                 let index = rand::random_range(0..vec.len());
                 if let Some(peer) = vec.get(index) {
-                    let msg = GossipMessage { known_peers: memory.known_peers.clone(), peers_hlc: memory.peers_hlc.clone(), tasks: memory.tasks.clone() };
+                    let msg = GossipMessage { known_peers: peers, peers_hlc: memory.peers_hlc.clone(), tasks: memory.tasks.clone() };
                     let encoded = bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
                     socket.send_to(&encoded, peer).await.unwrap();
                     info!("node={}; sent {:?} to {:?}", node_name, msg, peer);
