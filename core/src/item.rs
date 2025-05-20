@@ -1,10 +1,14 @@
-use crate::gossip::{HLC, now_millis};
+use crate::now_millis;
+use crate::gossip::HLC;
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub type ItemId = String;
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Item {
-    pub id: String,
+    pub id: ItemId,
     pub message: String, // Example metadata
     pub submitted_at: u64,
 }
@@ -39,6 +43,6 @@ pub struct ItemSubmit {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ItemSubmitResponse {
-    pub success: Option<String>,
+    pub success: Option<HashMap<String, String>>,
     pub error: Option<String>,
 }

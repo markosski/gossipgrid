@@ -1,4 +1,4 @@
-use core::gossip::{ClusterConfig, NodeMemory};
+use core::node::{ClusterConfig, NodeMemory};
 use core::node;
 use std::sync::Arc;
 use tokio::sync::Mutex;

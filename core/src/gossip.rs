@@ -1,19 +1,21 @@
 use crate::item::{ItemEntry, ItemStatus};
+use crate::node::{ClusterConfig, DeltaAckState, Node, NodeMemory};
 use crate::partition::PartitionMap;
+use crate::now_millis;
 use bincode::{Decode, Encode};
-use log::{error, info};
+use log::{debug, error, info};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+const GOSSIP_DELTA_TIMEOUT: Duration = Duration::from_secs(30);
 const GOSSIP_INTERVAL: Duration = Duration::from_secs(5);
 const FAILURE_TIMEOUT: Duration = Duration::from_secs(15);
 const BUFFER_SIZE: usize = 1024;
@@ -25,15 +27,14 @@ pub struct HLC {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct Node {
-    pub address: String,
-    pub last_seen: u64,
-}
-
-#[derive(Debug, Clone, Encode, Decode)]
 pub struct SyncRequest {
     pub is_sync_request: bool,
     pub since: HLC,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct GossipAck {
+    pub items_received: Vec<ItemEntry>,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
@@ -45,187 +46,6 @@ pub struct GossipMessage {
     pub items_delta: Vec<ItemEntry>,
     pub sync_request: SyncRequest,
     pub sync_response: bool,
-}
-
-#[derive(Debug, Clone, Encode, Decode)]
-pub struct ClusterConfig {
-    pub cluster_size: usize,
-    pub partition_count: usize,
-    pub replication_factor: usize,
-}
-
-pub struct NodeMemory {
-    pub this_node: String,
-    pub cluster_config: ClusterConfig,
-    pub partition_map: PartitionMap,
-    pub all_peers: HashMap<String, Node>,
-    pub node_hlc: HLC,
-    pub items: HashMap<String, ItemEntry>,
-    pub index: BTreeMap<HLC, HashSet<String>>,
-    pub node_index: u8,
-}
-
-impl NodeMemory {
-    pub fn init(
-        local_addr: String,
-        seed_peer: Option<String>,
-        cluster_config: ClusterConfig,
-    ) -> NodeMemory {
-        let mut known_peers = HashMap::new();
-        known_peers.insert(
-            local_addr.clone(),
-            Node {
-                address: local_addr.clone(),
-                last_seen: 0,
-            },
-        );
-
-        if let Some(peer) = seed_peer {
-            known_peers.insert(
-                peer.clone(),
-                Node {
-                    address: peer.clone(),
-                    last_seen: now_millis(),
-                },
-            );
-        }
-
-        NodeMemory {
-            this_node: local_addr,
-            cluster_config: cluster_config.clone(),
-            partition_map: PartitionMap::new(
-                &cluster_config.partition_count,
-                &cluster_config.replication_factor,
-            ),
-            all_peers: known_peers,
-            node_hlc: HLC {
-                timestamp: now_millis(),
-                counter: 0,
-            },
-            items: HashMap::new(),
-            index: BTreeMap::new(),
-            node_index: 0,
-        }
-    }
-
-    pub fn next_node(&mut self) -> String {
-        let other_peers = self.other_peers();
-        let mut nodes: Vec<String> = other_peers.keys().cloned().collect();
-        nodes.sort();
-
-        let selected_peer = nodes
-            .get(self.node_index as usize % other_peers.len())
-            .cloned()
-            .unwrap_or_else(|| self.this_node.clone());
-
-        if self.node_index < self.other_peers().len() as u8 {
-            self.node_index += 1;
-        } else {
-            self.node_index = 0;
-        }
-        selected_peer
-    }
-
-    pub fn size(&self) -> usize {
-        self.all_peers.len()
-    }
-
-    pub fn other_peers(&self) -> HashMap<String, Node> {
-        let mut other_peers = self.all_peers.clone();
-        other_peers.remove(&self.this_node);
-        other_peers
-    }
-
-    pub fn add_node(&mut self, node: Node) {
-        self.all_peers.insert(node.address.clone(), node);
-        self.node_hlc.tick_hlc(now_millis());
-    }
-
-    pub fn remove_node(&mut self, node_id: &String) {
-        if self.all_peers.get(node_id).is_some() {
-            self.all_peers.remove(node_id);
-            self.items.remove(node_id);
-            self.node_hlc.tick_hlc(now_millis());
-        }
-    }
-
-    pub fn add_item(&mut self, entry: ItemEntry) {
-        if self.items.contains_key(&entry.item.id) {
-            // Update existing item
-            if let Some(new_entry) = self.items.get_mut(&entry.item.id) {
-                match new_entry.status {
-                    ItemStatus::Active => {
-                        // Update the item
-                        if new_entry.hlc.compare(&entry.hlc) == Ordering::Less {
-                            new_entry.hlc = HLC::merge(&new_entry.hlc, &entry.hlc, now_millis());
-                            new_entry.item = entry.item;
-
-                            match self.index.get_mut(&new_entry.hlc) {
-                                Some(set) => {
-                                    // If the set already exists, we just add the item id
-                                    set.insert(new_entry.item.id.clone());
-                                }
-                                None => {
-                                    // If the set does not exist, we create a new one
-                                    let mut set = HashSet::new();
-                                    set.insert(new_entry.item.id.clone());
-                                    self.index.insert(new_entry.hlc.clone(), set);
-                                }
-                            }
-                        }
-                    }
-                    ItemStatus::Tombstone(_) => {
-                        // If it was a tombstone, we do nothing
-                        // TODO: maybe we should remove it from the index?
-                    }
-                };
-            }
-        } else {
-            // Add new item
-            let mut new_entry = entry.clone();
-            new_entry.status = ItemStatus::Active;
-            new_entry.hlc = new_entry.hlc.tick_hlc(now_millis());
-            self.items.insert(entry.item.id.clone(), new_entry.clone());
-
-            let mut set = HashSet::new();
-            set.insert(new_entry.item.id.clone());
-            self.index.insert(new_entry.hlc.clone(), set);
-        }
-    }
-
-    pub fn add_items(&mut self, items: Vec<ItemEntry>) {
-        for item in items {
-            self.add_item(item);
-        }
-    }
-
-    pub fn remove_item(&mut self, item_id: &String) -> bool {
-        if let Some(item_entry) = self.items.get_mut(item_id) {
-            let mut new_item_entry = item_entry.clone();
-            new_item_entry.status = ItemStatus::Tombstone(now_millis());
-
-            self.items.insert(item_id.clone(), new_item_entry);
-            return true;
-        } else {
-            return false; // Node not found
-        }
-    }
-
-    pub fn count(&self) -> usize {
-        self.items.len()
-    }
-
-    pub fn items_since(&self, hlc: &HLC) -> Vec<ItemEntry> {
-        let mut items = vec![];
-        for (_, set) in self.index.range(hlc..).rev() {
-            for item_id in set {
-                if let Some(item) = self.items.get(item_id) {
-                    items.push(item.clone());
-                }
-            }
-        }
-        items
-    }
 }
 
 impl HLC {
@@ -288,11 +108,115 @@ impl RangeBounds<HLC> for HLC {
     }
 }
 
-pub fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_millis() as u64
+pub async fn send_gossip_ack(
+    node_name: &str,
+    items: &[ItemEntry],
+    peer_addr: &String,
+    local_addr: &String,
+    socket: Arc<UdpSocket>
+) {
+    info!("node_addr={}; Sending ACK {:?} items", node_name, &items.len());
+
+    let ack = GossipAck {
+        items_received: items.to_vec(),
+    };
+    let encoded_ack = bincode::encode_to_vec(&ack, bincode::config::standard()).unwrap();
+    socket.send_to(&encoded_ack, &peer_addr).await.unwrap();
+    info!(
+        "node_addr={}; sent {:?} to {:?}",
+        &local_addr, &ack, &peer_addr
+    );
+}
+
+async fn handle_main_message(node_name: &str, src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag: Arc<Mutex<bool>>, message: GossipMessage, memory: Arc<Mutex<NodeMemory>>) {
+    let mut memory = memory.lock().await;
+    let local_addr = memory.this_node.clone();
+
+    // Update peers to most recent timestamp and vector clock
+    match message.node_hlc.compare(&memory.node_hlc) {
+        Ordering::Greater | Ordering::Equal => {
+            memory.node_hlc =
+                HLC::merge(&memory.node_hlc, &message.node_hlc, now_millis());
+            memory.all_peers = message.all_peers.clone();
+        }
+        Ordering::Less => {
+            if message.node_hlc.timestamp == 0 {
+                memory.add_node(message.all_peers.get(&src.to_string()).unwrap().clone());
+                info!("Adding new node");
+            }
+            info!(
+                "node={}; Received HLC is older or equal to local HLC",
+                node_name
+            );
+        }
+    }
+
+    // Update partition map information
+    if memory.partition_map.is_empty()
+        && memory.size() == memory.cluster_config.cluster_size
+    {
+        // Check if we need to update the partition map
+        let mut partition_map = memory.partition_map.clone();
+        partition_map.assign(&memory.all_peers.keys().cloned().collect::<Vec<_>>());
+        // info!(
+        //     "************************ {:?}, {:?}",
+        //     &partition_map,
+        //     &memory.all_peers.keys().cloned().collect::<Vec<_>>()
+        // );
+        memory.partition_map = partition_map;
+    }
+
+    // Update received items and acknowledge
+    let items = message.items_delta.clone();
+    let _ = memory.add_items(items.clone(), &src.to_string());
+
+    if items.len() > 0 {
+        send_gossip_ack(node_name, &items, &src.to_string(), &local_addr, socket.clone()).await;
+    }
+
+    // Data sync
+    if message.sync_request.is_sync_request && memory.size() > 1 {
+        info!("node={}; Syncing back to {}", node_name, &src);
+        let mut items: Vec<ItemEntry> = vec![];
+        let last_seen = &memory.all_peers.get(&src.to_string()).unwrap().last_seen;
+        let last_seen_hlc = HLC::new().tick_hlc(last_seen.clone());
+        for entry in memory.items_since(&last_seen_hlc) {
+            if let Some(e) = memory.items.get(&entry.item.id) {
+                items.push(e.clone());
+            }
+        }
+        info!(
+            "node={}; Sync identifier {} items to send since {}",
+            node_name,
+            &items.len(),
+            last_seen
+        );
+        send_gossip_single(
+            node_name,
+            &items,
+            Some(&src.to_string()),
+            &local_addr,
+            socket.clone(),
+            &mut memory,
+            true,
+        )
+        .await;
+    }
+
+    // bump last update time, it is important this happens after the sync
+    memory.all_peers.entry(src.to_string()).and_modify(|node| {
+        node.last_seen = now_millis();
+    });
+
+    if message.sync_response {
+        let mut sync = sync_flag.lock().await;
+        *sync = false; // TODO: understand how this works
+    }
+}
+
+async fn handle_item_delta_message(src: &SocketAddr, message: GossipAck, memory: Arc<Mutex<NodeMemory>>) {
+    let mut memory = memory.lock().await;
+    memory.reconcile_delta_state(src.to_string(), &message.items_received);
 }
 
 pub async fn receive_gossip(
@@ -306,95 +230,21 @@ pub async fn receive_gossip(
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((size, src)) => {
-                let (response, _) = bincode::decode_from_slice::<GossipMessage, _>(
+                if let Ok((message, _)) = bincode::decode_from_slice::<GossipMessage, _>(
                     &buf[..size],
                     bincode::config::standard(),
-                )
-                .unwrap();
-                info!(
-                    "node={}; received {:?} from {:?}:{:?}",
-                    node_name,
-                    response,
-                    src.ip(),
-                    src.port()
-                );
+                ) {
+                    debug!("node={}; Received {:?} from {:?}:{:?}", node_name, message, src.ip(), src.port());
+                    handle_main_message(&node_name, &src, socket.clone(), sync_flag.clone(), message, memory.clone()).await;
+                };
 
-                {
-                    let mut memory = memory.lock().await;
-                    let local_addr = memory.this_node.clone();
-
-                    // Update peers to most recent timestamp and vector clock
-                    match response.node_hlc.compare(&memory.node_hlc) {
-                        Ordering::Greater => {
-                            memory.node_hlc =
-                                HLC::merge(&memory.node_hlc, &response.node_hlc, now_millis());
-                            memory.all_peers = response.all_peers.clone();
-                        }
-                        Ordering::Equal | Ordering::Less => {
-                            info!(
-                                "node={}; Received HLC is older or equal to local HLC",
-                                node_name
-                            );
-                            // Either local is up-to-date or newer; reject the membership update
-                            // but you may still want to merge tasks separately later!
-                        }
-                    }
-
-                    if memory.partition_map.is_empty()
-                        && memory.size() == memory.cluster_config.cluster_size
-                    {
-                        // Check if we need to update the partition map
-                        let mut partition_map = memory.partition_map.clone();
-                        partition_map.assign(&memory.all_peers.keys().cloned().collect::<Vec<_>>());
-                        info!(
-                            "************************ {:?}, {:?}",
-                            &partition_map,
-                            &memory.all_peers.keys().cloned().collect::<Vec<_>>()
-                        );
-                        memory.partition_map = partition_map;
-                    }
-
-                    // update tasks
-                    let items = response.items_delta.clone();
-                    memory.add_items(items);
-
-                    if response.sync_request.is_sync_request && memory.size() > 1 {
-                        info!("node={}; Syncing back to {}", node_name, &src);
-                        let mut items: Vec<ItemEntry> = vec![];
-                        let last_seen = &memory.all_peers.get(&src.to_string()).unwrap().last_seen;
-                        let last_see_hlc = HLC::new().tick_hlc(last_seen.clone());
-                        for entry in memory.items_since(&last_see_hlc) {
-                            if let Some(e) = memory.items.get(&entry.item.id) {
-                                items.push(e.clone());
-                            }
-                        }
-                        info!(
-                            "node={}; Sync identifier {} items to send since {}",
-                            node_name,
-                            &items.len(),
-                            last_seen
-                        );
-                        send_gossip_single(
-                            &items,
-                            Some(&src.to_string()),
-                            &local_addr,
-                            socket.clone(),
-                            &mut memory,
-                            true,
-                        )
-                        .await;
-                    }
-
-                    // bump last update time, it is important this happens after the sync
-                    memory.all_peers.entry(src.to_string()).and_modify(|node| {
-                        node.last_seen = now_millis();
-                    });
-
-                    if response.sync_response {
-                        let mut sync = sync_flag.lock().await;
-                        *sync = false; // TODO: understand how this works
-                    }
-                }
+                if let Ok((message, _)) = bincode::decode_from_slice::<GossipAck, _>(
+                    &buf[..size],
+                    bincode::config::standard(),
+                ) {
+                    debug!("node={}; Received {:?} from {:?}:{:?}", node_name, message, src.ip(), src.port());
+                    handle_item_delta_message(&src, message, memory.clone()).await;
+                };
             }
             Err(e) => {
                 error!("Receive error: {}", e);
@@ -404,6 +254,7 @@ pub async fn receive_gossip(
 }
 
 pub async fn send_gossip_single(
+    node_name: &str,
     items: &Vec<ItemEntry>,
     peer_addr: Option<&String>,
     local_addr: &String,
@@ -411,7 +262,7 @@ pub async fn send_gossip_single(
     memory: &mut NodeMemory,
     is_sync: bool,
 ) {
-    info!("node={}; Will send {:?} items", local_addr, &items.len());
+    info!("node={}; Will send {} items", &node_name, &items.len());
 
     let peer_dest: Option<String>;
     if let Some(peer) = peer_addr {
@@ -469,123 +320,168 @@ pub async fn send_gossip(
                 {
                     memory.remove_node(peer.0);
                     info!(
-                        "node={}; Removed peer: {:?} from known peers",
-                        node_name, peer.0
+                        "node={}; Removed peer: {} from known peers",
+                        &node_name, &peer.0
                     );
                 }
             }
 
-            let other_peers = memory.other_peers();
-            info!("node={}; Known peers: {:?}", node_name, &other_peers);
+            // Expire delta state if needed
+            memory.cleanup_expired_delta_state();
 
-            // Check if we need to send gossip
-            if memory.size() > 1 {
-                let peer_dest = memory.next_node().to_string();
-                info!("node={}; selected node: {:?}", node_name, &peer_dest);
+            // Check if there is at least one more node to send gossip to
+            let gossip_count = memory.gossip_count();
+            let next_nodes = memory.next_nodes(gossip_count);
+            let mut all_delta_count = 0;
 
-                // Send gossip to a random peer
-                let vec: Vec<String> = other_peers.keys().cloned().collect();
-                if vec.len() > 0 {
-                    let index = rand::random_range(0..vec.len());
-                    if let Some(peer) = vec.get(index) {
-                        let msg = GossipMessage {
-                            cluster_config: memory.cluster_config.clone(),
-                            partition_map: memory.partition_map.clone(),
-                            all_peers: peers,
-                            node_hlc: memory.node_hlc.clone(),
-                            items_delta: vec![],
-                            sync_request: SyncRequest {
-                                is_sync_request: sync_flag.clone(),
-                                since: HLC::new(),
-                            },
-                            sync_response: false,
-                        };
-                        let encoded =
-                            bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            for peer_dest in next_nodes.iter() {
+                let itmes_delta = memory.get_delta_for_node(&peer_dest);
+                all_delta_count += itmes_delta.len();
+                info!("node={}; selected node: {}; sending delta size: {}", &node_name, &peer_dest, &itmes_delta.len());
 
-                        socket.send_to(&encoded, &peer_dest).await.unwrap();
-                        info!(
-                            "node={}; sent {:?} to {:?}; sync={}",
-                            node_name, msg, &peer_dest, &sync_flag
-                        );
-                    }
-                }
+                let msg = GossipMessage {
+                    cluster_config: memory.cluster_config.clone(),
+                    partition_map: memory.partition_map.clone(),
+                    all_peers: peers.clone(),
+                    node_hlc: memory.node_hlc.clone(),
+                    items_delta: itmes_delta.clone(),
+                    sync_request: SyncRequest {
+                        is_sync_request: sync_flag.clone(),
+                        since: HLC::new(),
+                    },
+                    sync_response: false,
+                };
+                let encoded =
+                    bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+
+                socket.send_to(&encoded, &peer_dest).await.unwrap();
+
+                memory.add_delta_state(&itmes_delta, DeltaAckState {
+                    peers_pending: vec!(peer_dest.clone()).into_iter().collect(),
+                    created_at: now_millis,
+                });
+
+                info!(
+                    "node={}; sent {:?} to {:?}; sync={}",
+                    node_name, msg, &peer_dest, &sync_flag
+                );
             }
+
+            // Remove delta items if everyone we know has received them
+            if all_delta_count == 0 {
+                memory.clear_delta();
+            }
+
+            info!("node={}; Known peers: {:?}", node_name, &memory.other_peers());
+            info!("node={}; Item count: {}", node_name, &memory.items.len());
+            info!("node={}; Delta Cache size: {}", node_name, &memory.items_delta_cache.iter().count());
+            info!("node={}; Delta State size: {}", node_name, &memory.items_delta_state.len());
+            info!("node={}; Delta Items: {:?}", node_name, &memory.items_delta.len());
         }
         sleep(GOSSIP_INTERVAL).await;
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::item::Item;
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
 
-//     #[test]
-//     fn hlc_compare() {
-//         let hlc1 = HLC { timestamp: 100, counter: 0 };
-//         let hlc2 = HLC { timestamp: 200, counter: 0 };
-//         let hlc3 = HLC { timestamp: 100, counter: 1 };
-//         let hlc4 = HLC { timestamp: 100, counter: 0 };
+    use super::*;
+    use crate::item::Item;
 
-//         assert_ne!(hlc1, hlc3);
-//         assert_eq!(hlc1, hlc4);
-//         assert_eq!(hlc1.compare(&hlc2), Ordering::Less);
-//         assert_eq!(hlc2.compare(&hlc1), Ordering::Greater);
-//         assert_eq!(hlc1.compare(&hlc3), Ordering::Less);
-//         assert_eq!(hlc3.compare(&hlc1), Ordering::Greater);
-//     }
+    #[test]
+    fn hlc_compare() {
+        let hlc1 = HLC { timestamp: 100, counter: 0 };
+        let hlc2 = HLC { timestamp: 200, counter: 0 };
+        let hlc3 = HLC { timestamp: 100, counter: 1 };
 
-//     #[test]
-//     fn test_next_node() {
-//         let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), None, now_millis());
-//         memory.add_node(Node { address: "127.0.0.1:1200".to_string(), last_seen: 100 });
-//         memory.add_node(Node { address: "127.0.0.1:1300".to_string(), last_seen: 100 });
-//         memory.add_node(Node { address: "127.0.0.1:1400".to_string(), last_seen: 100 });
+        assert_ne!(hlc1, hlc3);
+        assert_eq!(hlc1.compare(&hlc2), Ordering::Less);
+        assert_eq!(hlc2.compare(&hlc1), Ordering::Greater);
+        assert_eq!(hlc1.compare(&hlc3), Ordering::Less);
+        assert_eq!(hlc3.compare(&hlc1), Ordering::Greater);
+        assert_eq!(hlc1.compare(&hlc3), Ordering::Less);
+    }
 
-//         let next_node = vec!(memory.next_node(), memory.next_node(), memory.next_node(), memory.next_node());
-//         assert_eq!(next_node, vec!("127.0.0.1:1200", "127.0.0.1:1300", "127.0.0.1:1400", "127.0.0.1:1200"));
-//     }
+    #[test]
+    fn test_next_node() {
+        let cluster_config = ClusterConfig {
+            cluster_size: 2,
+            partition_count: 8,
+            replication_factor: 2,
+        };
+        let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), None, cluster_config);
+        memory.add_node(Node { address: "127.0.0.1:1200".to_string(), last_seen: 100 });
+        memory.add_node(Node { address: "127.0.0.1:1300".to_string(), last_seen: 100 });
+        memory.add_node(Node { address: "127.0.0.1:1400".to_string(), last_seen: 100 });
 
-//     #[test]
-//     fn test_merge_tasks() {
-//         let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), None, now_millis());
-//         memory.items.insert("task1".to_string(), ItemEntry {
-//             item: Item {
-//                 id: "task1".to_string(),
-//                 message: "task1 message".to_string(),
-//                 submitted_at: 100,
-//             },
-//             status: ItemStatus::Active,
-//             hlc: HLC { timestamp: 100, counter: 0 },
-//         });
-//         memory.items.insert("task2".to_string(), ItemEntry {
-//             item: Item {
-//                 id: "task2".to_string(),
-//                 message: "task1 message".to_string(),
-//                 submitted_at: 100,
-//             },
-//             status: ItemStatus::Active,
-//             hlc: HLC { timestamp: 200, counter: 0 },
-//         });
-//         memory.items.insert("task3".to_string(), ItemEntry {
-//             item: Item {
-//                 id: "task3".to_string(),
-//                 message: "task1 message".to_string(),
-//                 submitted_at: 100,
-//             },
-//             status: ItemStatus::Active,
-//             hlc: HLC { timestamp: 300, counter: 0 },
-//         });
+        let next_node = vec!(memory.next_node(), memory.next_node(), memory.next_node(), memory.next_node());
+        assert_eq!(next_node, vec!("127.0.0.1:1200", "127.0.0.1:1300", "127.0.0.1:1400", "127.0.0.1:1200"));
+    }
 
-//         memory.index.insert(HLC { timestamp: 100, counter: 0 }, HashSet::from(["task1".to_string()]));
-//         memory.index.insert(HLC { timestamp: 200, counter: 0 }, HashSet::from(["task2".to_string()]));
-//         memory.index.insert(HLC { timestamp: 300, counter: 0 }, HashSet::from(["task3".to_string()]));
 
-//         let items = memory.items_since(&HLC { timestamp: 150, counter: 0 });
-//         assert_eq!(memory.index.len(), 3);
-//         assert_eq!(memory.items.len(), 3);
-//         assert_eq!(items.len(), 2);
+    #[test]
+    fn test_next_nodes() {
+        let cluster_config = ClusterConfig {
+            cluster_size: 2,
+            partition_count: 8,
+            replication_factor: 2,
+        };
+        let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), None, cluster_config);
+        memory.add_node(Node { address: "127.0.0.1:1200".to_string(), last_seen: 100 });
+        memory.add_node(Node { address: "127.0.0.1:1300".to_string(), last_seen: 100 });
 
-//     }
-// }
+        let next_nodes_1= memory.next_nodes(2);
+        let next_nodes_2= memory.next_nodes(2);
+
+        assert_eq!(next_nodes_1, vec!("127.0.0.1:1200", "127.0.0.1:1300"));
+        assert_eq!(next_nodes_2, vec!("127.0.0.1:1200", "127.0.0.1:1300"));
+    }
+
+    #[test]
+    fn test_merge_tasks() {
+        let cluster_config = ClusterConfig {
+            cluster_size: 2,
+            partition_count: 8,
+            replication_factor: 2,
+        };
+        let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), None, cluster_config);
+        memory.items.insert("task1".to_string(), ItemEntry {
+            item: Item {
+                id: "task1".to_string(),
+                message: "task1 message".to_string(),
+                submitted_at: 100,
+            },
+            status: ItemStatus::Active,
+            hlc: HLC { timestamp: 100, counter: 0 },
+        });
+        memory.items.insert("task2".to_string(), ItemEntry {
+            item: Item {
+                id: "task2".to_string(),
+                message: "task1 message".to_string(),
+                submitted_at: 100,
+            },
+            status: ItemStatus::Active,
+            hlc: HLC { timestamp: 200, counter: 0 },
+        });
+        memory.items.insert("task3".to_string(), ItemEntry {
+            item: Item {
+                id: "task3".to_string(),
+                message: "task1 message".to_string(),
+                submitted_at: 100,
+            },
+            status: ItemStatus::Active,
+            hlc: HLC { timestamp: 300, counter: 0 },
+        });
+
+        memory.index.insert(HLC { timestamp: 100, counter: 0 }, HashSet::from(["task1".to_string()]));
+        memory.index.insert(HLC { timestamp: 200, counter: 0 }, HashSet::from(["task2".to_string()]));
+        memory.index.insert(HLC { timestamp: 300, counter: 0 }, HashSet::from(["task3".to_string()]));
+
+        let items = memory.items_since(&HLC { timestamp: 150, counter: 0 });
+        assert_eq!(memory.index.len(), 3);
+        assert_eq!(memory.items.len(), 3);
+        assert_eq!(items.len(), 2);
+
+    }
+}

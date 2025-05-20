@@ -18,5 +18,6 @@ env_logger = { version="0.11.6", features = ["unstable-kv"]}
 names = { version = "0.14.0", default-features = false }
 serde = { version = "*", features = ["derive"] }
 bincode =  { version = "2.0.0", features = ["serde"] }
+ttl_cache = { version = "0.5.1" }
 
 [dev-dependencies]
