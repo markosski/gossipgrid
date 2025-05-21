@@ -30,7 +30,6 @@ async fn handle_post_task(
     memory: Arc<Mutex<NodeMemory>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let item_entry: ItemEntry;
-    let local_addr: String;
     let item_id: String;
 
     let is_cluster_formed: bool;
@@ -56,14 +55,12 @@ async fn handle_post_task(
         };
         let this_node = memory.this_node.clone();
         memory.add_items(vec!(item_entry.clone()), &this_node);
-        local_addr = memory.this_node.clone();
 
         if is_cluster_formed {
             send_gossip_single(
                 &this_node,
                 &vec![item_entry],
                 None,
-                &local_addr,
                 socket.clone(),
                 &mut memory,
                 false,

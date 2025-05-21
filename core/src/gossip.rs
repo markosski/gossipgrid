@@ -1,9 +1,10 @@
 use crate::item::{ItemEntry, ItemStatus};
 use crate::node::{ClusterConfig, DeltaAckState, Node, NodeMemory};
 use crate::partition::PartitionMap;
-use crate::now_millis;
+use crate::{gossip, now_millis};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
+use core::sync;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -195,7 +196,6 @@ async fn handle_main_message(node_name: &str, src: &SocketAddr, socket: Arc<UdpS
             node_name,
             &items,
             Some(&src.to_string()),
-            &local_addr,
             socket.clone(),
             &mut memory,
             true,
@@ -257,45 +257,21 @@ pub async fn send_gossip_single(
     node_name: &str,
     items: &Vec<ItemEntry>,
     peer_addr: Option<&String>,
-    local_addr: &String,
     socket: Arc<UdpSocket>,
     memory: &mut NodeMemory,
     is_sync: bool,
 ) {
     info!("node={}; Will send {} items", &node_name, &items.len());
 
-    let peer_dest: Option<String>;
+    let mut peers: Vec<String> = vec!();
     if let Some(peer) = peer_addr {
-        peer_dest = Some(peer.clone());
+        peers = vec!(peer.clone());
     } else if memory.size() > 1 {
-        peer_dest = Some(memory.next_node().to_string());
-    } else {
-        peer_dest = None;
+        peers = memory.next_nodes(memory.gossip_count());
     }
 
-    if let Some(peer_dest_actual) = peer_dest {
-        let msg = GossipMessage {
-            cluster_config: memory.cluster_config.clone(),
-            partition_map: memory.partition_map.clone(),
-            all_peers: memory.all_peers.clone(),
-            node_hlc: memory.node_hlc.clone(),
-            items_delta: items.clone(),
-            sync_request: SyncRequest {
-                is_sync_request: false,
-                since: HLC::new(),
-            },
-            sync_response: is_sync,
-        };
-
-        let encoded = bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        socket.send_to(&encoded, &peer_dest_actual).await.unwrap();
-        info!(
-            "node={}; sent {:?} to {:?}; sync={}",
-            &local_addr, &msg, &peer_dest_actual, &is_sync
-        );
-    } else {
-        info!("node={}; no other peers to gossip with", &local_addr);
-    }
+    // Send gossip to next nodes
+    send_gossip_helper(&node_name, &peers, memory, false, is_sync, &socket).await;
 }
 
 pub async fn send_gossip(
@@ -329,48 +305,10 @@ pub async fn send_gossip(
             // Expire delta state if needed
             memory.cleanup_expired_delta_state();
 
-            // Check if there is at least one more node to send gossip to
+            // Send gossip to next nodes
             let gossip_count = memory.gossip_count();
             let next_nodes = memory.next_nodes(gossip_count);
-            let mut all_delta_count = 0;
-
-            for peer_dest in next_nodes.iter() {
-                let itmes_delta = memory.get_delta_for_node(&peer_dest);
-                all_delta_count += itmes_delta.len();
-                info!("node={}; selected node: {}; sending delta size: {}", &node_name, &peer_dest, &itmes_delta.len());
-
-                let msg = GossipMessage {
-                    cluster_config: memory.cluster_config.clone(),
-                    partition_map: memory.partition_map.clone(),
-                    all_peers: peers.clone(),
-                    node_hlc: memory.node_hlc.clone(),
-                    items_delta: itmes_delta.clone(),
-                    sync_request: SyncRequest {
-                        is_sync_request: sync_flag.clone(),
-                        since: HLC::new(),
-                    },
-                    sync_response: false,
-                };
-                let encoded =
-                    bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-
-                socket.send_to(&encoded, &peer_dest).await.unwrap();
-
-                memory.add_delta_state(&itmes_delta, DeltaAckState {
-                    peers_pending: vec!(peer_dest.clone()).into_iter().collect(),
-                    created_at: now_millis,
-                });
-
-                info!(
-                    "node={}; sent {:?} to {:?}; sync={}",
-                    node_name, msg, &peer_dest, &sync_flag
-                );
-            }
-
-            // Remove delta items if everyone we know has received them
-            if all_delta_count == 0 {
-                memory.clear_delta();
-            }
+            send_gossip_helper(&node_name, &next_nodes, &mut memory, sync_flag.clone(), false, &socket).await;
 
             info!("node={}; Known peers: {:?}", node_name, &memory.other_peers());
             info!("node={}; Item count: {}", node_name, &memory.items.len());
@@ -379,6 +317,50 @@ pub async fn send_gossip(
             info!("node={}; Delta Items: {:?}", node_name, &memory.items_delta.len());
         }
         sleep(GOSSIP_INTERVAL).await;
+    }
+}
+
+async fn send_gossip_helper(node_name: &str, next_nodes: &[String], memory: &mut NodeMemory, sync_flag: bool, is_sync_response: bool, socket: &UdpSocket) {
+    let mut all_delta_count = 0;
+
+    for peer_dest in next_nodes.iter() {
+        let itmes_delta = memory.get_delta_for_node(&peer_dest);
+        all_delta_count += itmes_delta.len();
+        info!("node={}; selected node: {}; sending delta size: {}", node_name, &peer_dest, &itmes_delta.len());
+
+        let msg = GossipMessage {
+            cluster_config: memory.cluster_config.clone(),
+            partition_map: memory.partition_map.clone(),
+            all_peers: memory.all_peers.clone(),
+            node_hlc: memory.node_hlc.clone(),
+            items_delta: itmes_delta.clone(),
+            sync_request: SyncRequest {
+                is_sync_request: sync_flag,
+                since: HLC::new(),
+            },
+            sync_response: is_sync_response,
+        };
+        let encoded =
+            bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+
+        socket.send_to(&encoded, &peer_dest).await.unwrap();
+
+        if !sync_flag {
+            memory.add_delta_state(&itmes_delta, DeltaAckState {
+                peers_pending: vec!(peer_dest.clone()).into_iter().collect(),
+                created_at: now_millis(),
+            });
+
+            // Remove delta items if everyone we know has received them
+            if all_delta_count == 0 && next_nodes.len() > 0 {
+                memory.clear_delta();
+            }
+        }
+
+        info!(
+            "node={}; sent {:?} to {:?}; sync={}",
+            node_name, msg, &peer_dest, &sync_flag
+        );
     }
 }
 
