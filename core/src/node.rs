@@ -1,6 +1,8 @@
 use crate::gossip::{receive_gossip, send_gossip, HLC};
 use crate::item::{ItemEntry, ItemId, ItemStatus};
-use crate::partition::PartitionMap;
+use crate::partition::{PartitionMap, VNode};
+use crate::store::memory_store::InMemoryStore;
+use crate::store::Store;
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
 use log::info;
@@ -48,33 +50,37 @@ pub async fn start_node(web_addr: String, local_addr: String, node_memory: Arc<M
     web::web_server(web_addr.clone(), socket.clone(), node_memory.clone()).await;
 }
 
-type NodeId = String;
+pub type NodeId = String;
 
 pub struct NodeMemory {
     pub this_node: NodeId,
+    pub this_node_web_port: u16,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
     pub all_peers: HashMap<NodeId, Node>,
     pub node_hlc: HLC,
-    pub items: HashMap<ItemId, ItemEntry>,
-    pub items_delta: HashMap<ItemId, ItemEntry>,
+    store: Box<dyn Store>,
+    // items: HashMap<ItemId, ItemEntry>,
+    // item_partitions: HashMap<VNode, HashMap<ItemId, ItemEntry>>,
+    // pub items_delta: HashMap<ItemId, ItemEntry>,
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
     pub items_delta_cache: TtlCache<ItemId, DeltaOrigin>,
     pub index: BTreeMap<HLC, HashSet<String>>,
-    pub node_index: u8,
+    pub next_node_index: u8,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Node {
     pub address: String,
+    pub web_port: u16,
     pub last_seen: u64,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct ClusterConfig {
-    pub cluster_size: usize,
-    pub partition_count: usize,
-    pub replication_factor: usize,
+    pub cluster_size: u16,
+    pub partition_count: u16,
+    pub replication_factor: u8,
 }
 
 // Store acknowledgments for each item and the nodes it wasw sent to
@@ -94,6 +100,7 @@ pub struct DeltaOrigin {
 impl NodeMemory {
     pub fn init(
         local_addr: String,
+        local_web_port: u16,
         seed_peer: Option<String>,
         cluster_config: ClusterConfig,
     ) -> NodeMemory {
@@ -102,6 +109,7 @@ impl NodeMemory {
             local_addr.clone(),
             Node {
                 address: local_addr.clone(),
+                web_port: local_web_port,
                 last_seen: 0,
             },
         );
@@ -111,13 +119,15 @@ impl NodeMemory {
                 peer.clone(),
                 Node {
                     address: peer.clone(),
+                    web_port: 0,
                     last_seen: now_millis(),
                 },
             );
         }
 
-        NodeMemory {
+        let mut node = NodeMemory {
             this_node: local_addr,
+            this_node_web_port: local_web_port,
             cluster_config: cluster_config.clone(),
             partition_map: PartitionMap::new(
                 &cluster_config.partition_count,
@@ -125,19 +135,26 @@ impl NodeMemory {
             ),
             all_peers: known_peers,
             node_hlc: HLC {
-                timestamp: 0,
+                timestamp: 0, // Initialize HLC with zero timestamp otherwise new node will be seen as source of truth for cluster state
                 counter: 0,
             },
-            items: HashMap::new(),
+            store: Box::new(InMemoryStore::new()),
             index: BTreeMap::new(),
-            items_delta: HashMap::new(),
             items_delta_state: HashMap::new(),
             items_delta_cache: TtlCache::new(10000),
-            node_index: 0,
-        }
+            next_node_index: 0,
+        };
+
+        node.partition_map.assign(&node.all_peers.keys().cloned().collect::<Vec<_>>());
+        node
     }
 
-    pub fn gossip_count(&self) -> usize {
+    pub async fn get_item(&self, item_id: &ItemId) -> Option<ItemEntry> {
+        self.store.get(&VNode::default(), item_id)
+            .await
+    }
+
+    pub fn gossip_count(&self) -> u8 {
         min(2, self.cluster_config.replication_factor)
     }
 
@@ -147,17 +164,17 @@ impl NodeMemory {
         nodes.sort();
 
         let selected_peer = nodes
-            .get(self.node_index as usize % other_peers.len())
+            .get(self.next_node_index as usize % other_peers.len())
             .cloned()
             .unwrap_or_else(|| self.this_node.clone());
 
-        self.node_index = self.node_index.wrapping_add(1);
+        self.next_node_index = self.next_node_index.wrapping_add(1);
         selected_peer
     }
     
-    pub fn next_nodes(&mut self, count: usize) -> Vec<String> {
+    pub fn next_nodes(&mut self, count: u8) -> Vec<String> {
         let peer_size = self.other_peers().len();
-        let max_count = min(count, peer_size);
+        let max_count = min(count as usize, peer_size);
         let mut selected_next = vec!();
         for _ in 0..max_count {
             selected_next.push(self.next_node());
@@ -165,8 +182,16 @@ impl NodeMemory {
         selected_next
     }
 
-    pub fn size(&self) -> usize {
-        self.all_peers.len()
+    pub fn is_cluster_formed(&self) -> bool {
+        self.cluster_size() == self.cluster_config.cluster_size
+    }
+
+    pub fn cluster_size(&self) -> u16 {
+        self.all_peers.len() as u16
+    }
+
+    pub fn all_peers(&self) -> HashMap<String, Node> {
+        self.all_peers.clone()
     }
 
     pub fn other_peers(&self) -> HashMap<String, Node> {
@@ -183,14 +208,14 @@ impl NodeMemory {
     pub fn remove_node(&mut self, node_id: &String) {
         if self.all_peers.get(node_id).is_some() {
             self.all_peers.remove(node_id);
-            self.items.remove(node_id);
             self.node_hlc.tick_hlc(now_millis());
         }
     }
 
     // Also invalidate delta state for the item
-    fn add_item(&mut self, entry: ItemEntry, from_node: &str) -> Option<ItemEntry> {
-        if let Some(existing_entry) = self.items.get(&entry.item.id) {
+    pub async fn add_item(&mut self, entry: ItemEntry, from_node: &str) -> Option<ItemEntry> {
+        let vnode = self.partition_map.hash_key(&entry.item.id);
+        if let Some(existing_entry) = self.store.get(&vnode, &entry.item.id).await {
             match existing_entry.status {
                 ItemStatus::Active => {
                     // Update the item
@@ -214,9 +239,8 @@ impl NodeMemory {
                             }
                         }
 
-                        self.items.insert(entry.item.id.clone(), new_entry.clone());
+                        self.store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
                         // Update the delta and cache
-                        self.items_delta.insert(entry.item.id.clone(), new_entry.clone());
                         self.items_delta_cache.insert(
                             entry.item.id.clone(),
                             DeltaOrigin {
@@ -242,14 +266,13 @@ impl NodeMemory {
         } else {
             // Add new item
             let new_entry = entry.clone();
-            self.items.insert(entry.item.id.clone(), new_entry.clone());
+            self.store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
 
             let mut set = HashSet::new();
             set.insert(new_entry.item.id.clone());
             self.index.insert(new_entry.hlc.clone(), set);
             
-            // Add to delta and cache
-            self.items_delta.insert(entry.item.id.clone(), new_entry.clone());
+            // Add to delta cache
             self.items_delta_cache.insert(
                 entry.item.id.clone(),
                 DeltaOrigin {
@@ -263,24 +286,25 @@ impl NodeMemory {
         }
     }
 
-    pub fn add_items(&mut self, items: Vec<ItemEntry>, from_node: &str) -> Vec<ItemEntry> {
+    pub async fn add_items(&mut self, items: Vec<ItemEntry>, from_node: &str) -> Vec<ItemEntry> {
         let mut added_items = vec![];
         for item in items {
-            if let Some(new_entry) = self.add_item(item.clone(), from_node) {
+            if let Some(new_entry) = self.add_item(item.clone(), from_node).await {
                 added_items.push(new_entry.clone());
             }
         }
         added_items
     }
 
-    // TODO: consider checking if acknowledged item is newer than the one in the delta
-    pub fn reconcile_delta_state(&mut self, from_node: String, ack_delta_items: &[ItemEntry]) {
+    // The reason why we check each item insead of a batch of items as a whole is that we want to ensure that we only remove the items that are acknowledged by the peer
+    // and not remove items that are still pending acknowledgment, e.g. in case new itmes are added to the delta state.
+    pub async fn reconcile_delta_state(&mut self, from_node: String, ack_delta_items: &[ItemEntry]) {
         for ack_item in ack_delta_items {
             if let Some(delta_ack) = self.items_delta_state.get_mut(&ack_item.item.id) {
                 delta_ack.peers_pending.remove(&from_node);
 
                 if delta_ack.peers_pending.is_empty() {
-                    self.items_delta.remove(&ack_item.item.id);
+                    self.store.remove_delta_item(&ack_item.item.id).await;
                     self.items_delta_state.remove(&ack_item.item.id);
                 }
             }
@@ -319,8 +343,8 @@ impl NodeMemory {
         });
     }
 
-    pub fn clear_delta(&mut self) {
-        self.items_delta.clear();
+    pub async fn clear_delta(&mut self) {
+        self.store.clear_all_delta().await;
     }
 
     pub fn get_delta_state(&self) -> HashMap<ItemId, DeltaAckState> {
@@ -329,10 +353,10 @@ impl NodeMemory {
 
     // for each item
     // check if item is in the cache for the node and if it is 
-    pub fn get_delta_for_node(&self, node: &NodeId) -> Vec<ItemEntry> {
+    pub async fn get_delta_for_node(&self, node: &NodeId) -> Vec<ItemEntry> {
         let mut items = vec![];
-        for (item_id, item_entry) in self.items_delta.iter() {
-            if let Some(cached_item) = self.items_delta_cache.get(item_id) {
+        for item_entry in self.store.get_all_delta().await.iter() {
+            if let Some(cached_item) = self.items_delta_cache.get(item_entry.item.id.as_str()) {
                 if !(cached_item.node_id == *node && cached_item.item_hlc >= item_entry.hlc) {
                     items.push(item_entry.clone());
                 }
@@ -343,28 +367,31 @@ impl NodeMemory {
         items
     }
 
-    pub fn remove_item(&mut self, item_id: &String) -> bool {
-        if let Some(item_entry) = self.items.get_mut(item_id) {
+    pub async fn remove_item(&mut self, item_id: &String) -> bool {
+        let vnode = self.partition_map.hash_key(item_id);
+
+        if let Some(item_entry) = self.store.get(&vnode, item_id).await {
             let mut new_item_entry = item_entry.clone();
             new_item_entry.status = ItemStatus::Tombstone(now_millis());
 
-            self.items.insert(item_id.clone(), new_item_entry.clone());
-            self.items_delta.insert(item_id.clone(), new_item_entry.clone());
+            self.store.add(&vnode, item_id.clone(), new_item_entry.clone()).await;
             return true;
         } else {
             return false; // Node not found
         }
     }
 
-    pub fn items_count(&self) -> usize {
-        self.items.len()
+    pub async fn items_count(&self) -> usize {
+        self.store.count().await
     }
 
-    pub fn items_since(&self, hlc: &HLC) -> Vec<ItemEntry> {
+    pub async fn items_since(&self, hlc: &HLC) -> Vec<ItemEntry> {
         let mut items = vec![];
         for (_, set) in self.index.range(hlc..).rev() {
             for item_id in set {
-                if let Some(item) = self.items.get(item_id) {
+            let vnode = self.partition_map.hash_key(item_id);
+        
+                if let Some(item) = self.store.get(&vnode, item_id).await {
                     items.push(item.clone());
                 }
             }
@@ -380,15 +407,15 @@ mod tests {
     use crate::gossip::HLC;
     use crate::item::{Item, ItemStatus};
 
-    #[test]
-    fn test_reconcile_delta() {
+    #[tokio::test]
+    async fn test_reconcile_delta() {
         let cluster_config = ClusterConfig {
             cluster_size: 2,
             partition_count: 8,
             replication_factor: 2,
         };
 
-        let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), None, cluster_config);
+        let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), 3001, None, cluster_config);
         
         let item1 = ItemEntry {
             item: Item {
@@ -409,13 +436,14 @@ mod tests {
             hlc: HLC { timestamp: 101, counter: 0 },
         };
 
-        memory.add_items(vec!(item1.clone(), item2.clone()), "nodeA");
+        memory.add_items(vec!(item1.clone(), item2.clone()), "nodeA").await;
         memory.add_delta_state(&[item1.clone(), item2.clone()], DeltaAckState {
             peers_pending: ["nodeA".to_string()].iter().cloned().collect(),
             created_at: now_millis(),
         });
 
-        let item1_timestamp = memory.items.get(&item1.item.id).unwrap().hlc.timestamp;
+        let vnode = memory.partition_map.hash_key(&item1.item.id);
+        let item1_timestamp = memory.store.get(&vnode, &item1.item.id).await.unwrap().hlc.timestamp;
         
         memory.reconcile_delta_state("nodeA".to_string(), &[ItemEntry {
             item: Item {
@@ -425,9 +453,9 @@ mod tests {
             },
             status: ItemStatus::Active,
             hlc: HLC { timestamp: item1_timestamp, counter: 0 },
-        }]);
+        }]).await;
 
-        assert_eq!(memory.items_delta.len(), 1);
+        assert_eq!(memory.store.delta_count().await, 1);
 
     }
 }

@@ -5,6 +5,7 @@ pub mod item;
 pub mod node;
 pub mod partition;
 pub mod web;
+pub mod store;
 
 pub fn now_millis() -> u64 {
     SystemTime::now()

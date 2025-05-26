@@ -8,7 +8,7 @@ edition = "2024"
 [lib]
 
 [dependencies]
-tokio = { version = "1.0", features = ["net", "sync", "time", "rt-multi-thread"] }
+tokio = { version = "1.0", features = ["net", "sync", "time", "rt-multi-thread", "macros"] }
 warp = { version = "*" }
 twox-hash = { version = "*" }
 uuid = { version = "1.16.0", features = ["v4"] }
@@ -17,7 +17,10 @@ log = { version="0.4.26", features=["kv"] }
 env_logger = { version="0.11.6", features = ["unstable-kv"]}
 names = { version = "0.14.0", default-features = false }
 serde = { version = "*", features = ["derive"] }
+serde_json = { version = "*" }
 bincode =  { version = "2.0.0", features = ["serde"] }
 ttl_cache = { version = "0.5.1" }
+async-trait = { version = "*" }
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]

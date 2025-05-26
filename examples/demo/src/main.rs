@@ -20,14 +20,16 @@ async fn main() {
     let seed_peer = args.get(3).map(|s| s.to_string());
 
     let cluster_config = ClusterConfig {
-        cluster_size: 2,
+        cluster_size: 3,
         partition_count: 8,
         replication_factor: 2,
     };
 
     // Initialize node memory
+    let web_port: u16 = args.get(1).unwrap().parse().expect("Invalid port number");
     let node_memory = Arc::new(Mutex::new(NodeMemory::init(
         local_addr.clone(),
+        web_port,
         seed_peer,
         cluster_config,
     )));
