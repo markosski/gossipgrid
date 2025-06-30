@@ -89,68 +89,70 @@ async fn handle_post_task(
     let mut memory = memory.lock().await;
     let response: ItemSubmitResponse;
 
-    if memory.is_cluster_formed() {
-        let routed_node = memory.partition_map.route(&item_id);
-        info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
-        if let Some(node) = routed_node {
-            if memory.this_node != *node {
-                let this_host: SocketAddr = node.parse().unwrap();
-                let web_host = format!("{}:{}", this_host.ip(), 3002);
-                info!("Routing item to remote node: {}", web_host);
-                let new_item = ItemSubmit {
-                    message: item.message.clone(),
-                    id: Some(item_id.clone()),
-                };
-                response = proxy_request(&web_host, "items", ProxyMethod::Post, Some(&new_item)).await.unwrap();
-            } else {
-                info!("Routing to this node");
-                let now = now_millis();
+    if !memory.is_cluster_formed() {
+        response = ItemSubmitResponse {
+            success: None,
+            error: Some(format!("Cluster not formed")),
+        };
+        return Ok(warp::reply::json(&response));
+    }
 
-                let item = Item {
-                    id: item_id.to_string(),
-                    message: item.message.clone(),
-                    submitted_at: now.clone(),
-                };
-
-                item_entry = ItemEntry {
-                    item: item,
-                    status: ItemStatus::Active,
-                    hlc: HLC {
-                        timestamp: now.clone(),
-                        counter: 0,
-                    },
-                };
-                let this_node = memory.this_node.clone();
-                memory.add_items(vec!(item_entry.clone()), &this_node).await;
-
-                // TODO: send to all replicas
-                send_gossip_single(
-                    &this_node,
-                    &vec![item_entry],
-                    None,
-                    socket.clone(),
-                    &mut memory,
-                    false,
-                )
-                .await;
-
-                response = ItemSubmitResponse {
-                    success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
-                    error: None,
-                };
-            }
+    let routed_node = memory.partition_map.route(&item_id);
+    info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
+    if let Some(node) = routed_node {
+        if memory.this_node != *node {
+            let this_host: SocketAddr = node.parse().unwrap();
+            let web_host = format!("{}:{}", this_host.ip(), 3002);
+            info!("Routing item to remote node: {}", web_host);
+            let new_item = ItemSubmit {
+                message: item.message.clone(),
+                id: Some(item_id.clone()),
+            };
+            response = proxy_request(&web_host, "items", ProxyMethod::Post, Some(&new_item)).await.unwrap();
         } else {
+            info!("Routing to this node");
+            let now = now_millis();
+
+            let item = Item {
+                id: item_id.to_string(),
+                message: item.message.clone(),
+                submitted_at: now.clone(),
+            };
+
+            item_entry = ItemEntry {
+                item: item,
+                status: ItemStatus::Active,
+                hlc: HLC {
+                    timestamp: now.clone(),
+                    counter: 0,
+                },
+            };
+            let this_node = memory.this_node.clone();
+            memory.add_items(vec!(item_entry.clone()), &this_node).await;
+
+            // TODO: send to all replicas
+            send_gossip_single(
+                &this_node,
+                &vec![item_entry],
+                None,
+                socket.clone(),
+                &mut memory,
+                false,
+            )
+            .await;
+
             response = ItemSubmitResponse {
-                success: None,
-                error: Some(format!("Could not route to node, cluster not ready")),
+                success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
+                error: None,
             };
         }
     } else {
         response = ItemSubmitResponse {
             success: None,
-            error: Some(format!("Cluster not formed")),
+            error: Some(format!("Could not route to node, cluster not ready")),
         };
     }
+
     return Ok(warp::reply::json(&response));
 }
 
@@ -160,6 +162,10 @@ async fn handle_get_task(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let memory = memory.lock().await;
+
+    let routed_node = memory.partition_map.route(&item_id);
+    info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
+
     if let Some(item) = memory.get_item(&item_id).await {
         let response = ItemSubmitResponse {
             success: Some(vec![("item".to_string(), format!("{:?}", item))].into_iter().collect()),
@@ -195,18 +201,38 @@ async fn handle_remove_task(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let mut memory = memory.lock().await;
-    let is_success = memory.remove_item(&item_id).await;
+    let this_node_addr = memory.this_node.clone();
+    let this_node = memory.get_node(&this_node_addr).unwrap();
+    let is_success = memory.remove_item(&item_id.to_string(), &this_node_addr).await;
+
+    let routed_node = memory.partition_map.route(&item_id);
+    info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
 
     let response: ItemSubmitResponse;
-    if is_success {
-        response = ItemSubmitResponse {
-            success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
-            error: None,
-        };
+    if let Some(node) = routed_node {
+        if memory.this_node != *node {
+            let this_host: SocketAddr = node.parse().unwrap();
+            let web_host = format!("{}:{}", this_host.ip(), this_node.web_port);
+            info!("Routing item to remote node: {}", web_host);
+
+            response = proxy_request::<()>(&web_host, format!("items/{}", item_id).as_str(), ProxyMethod::Delete, None).await.unwrap();
+        } else {
+            if is_success {
+                response = ItemSubmitResponse {
+                    success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
+                    error: None,
+                };
+            } else {
+                response = ItemSubmitResponse {
+                    success: None,
+                    error: Some(format!("Task not found: {}", item_id)),
+                };
+            }
+        }
     } else {
         response = ItemSubmitResponse {
             success: None,
-            error: Some(format!("Task not found: {}", item_id)),
+            error: Some(format!("Could not route to node, cluster not ready")),
         };
     }
 

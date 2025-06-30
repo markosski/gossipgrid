@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use log::info;
+
 use crate::partition::VNode;
 
 // Add this import or definition for ItemId
@@ -35,6 +37,8 @@ impl Store for InMemoryStore {
 
     async fn add(&mut self, vnode: &VNode, key: String, value: ItemEntry) {
         let vnode_partition = self.item_partitions.get_mut(vnode);
+        info!("Adding item to vnode: {:?}, key: {}, value: {:?}", vnode, key, value);
+
         if let Some(partition) = vnode_partition {
             partition.insert(key.clone(), value.clone());
             self.items_delta.insert(key, value);
@@ -47,6 +51,8 @@ impl Store for InMemoryStore {
     }
 
     async fn remove(&mut self, vnode: &VNode, key: &str) {
+        info!("Removing item from vnode: {:?}, key: {}", vnode, key);
+
         let vnode_partition = self.item_partitions.get_mut(vnode);
         if let Some(partition) = vnode_partition {
             partition.remove(key);

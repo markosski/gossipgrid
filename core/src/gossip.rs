@@ -135,23 +135,30 @@ async fn handle_main_message(node_name: &str, src: &SocketAddr, socket: Arc<UdpS
     // Update peers to most recent timestamp and vector clock
     match message.node_hlc.compare(&memory.node_hlc) {
         Ordering::Greater | Ordering::Equal => {
-            memory.node_hlc =
-                HLC::merge(&memory.node_hlc, &message.node_hlc, now_millis());
-            memory.all_peers = message.all_peers.clone();
-            memory.partition_map = message.partition_map.clone();
-            memory.cluster_config = message.cluster_config.clone();
-            info!(
-                "node={}; Received HLC is newer or equal to local HLC; Updated node_hlc: {:?}",
-                node_name, memory.node_hlc
-            );
+            let membership_changed = memory.all_peers != message.all_peers;
+            let partition_map_changed = memory.partition_map != message.partition_map;
+            let config_changed = memory.cluster_config != message.cluster_config;
+
+            if membership_changed || partition_map_changed || config_changed {
+                memory.node_hlc =
+                    HLC::merge(&memory.node_hlc, &message.node_hlc, now_millis());
+                memory.all_peers = message.all_peers.clone();
+                memory.partition_map = message.partition_map.clone();
+                memory.cluster_config = message.cluster_config.clone();
+                info!(
+                    "node={}; Received HLC is newer or equal to local HLC; Updated node_hlc: {:?}",
+                    node_name, memory.node_hlc
+                );
+            }
         }
         Ordering::Less => {
             if message.node_hlc.timestamp == 0 {
+                memory.node_hlc.tick_hlc(now_millis());
                 memory.add_node(message.all_peers.get(&src.to_string()).unwrap().clone());
-                info!("Adding new node");
+                info!("node={}; Adding new node", node_name);
             }
             info!(
-                "node={}; Received HLC is older or equal to local HLC",
+                "node={}; Received HLC is older to local HLC",
                 node_name
             );
         }
@@ -167,11 +174,22 @@ async fn handle_main_message(node_name: &str, src: &SocketAddr, socket: Arc<UdpS
     }
 
     // Update received items and acknowledge
-    let items = message.items_delta.clone();
-    let _ = memory.add_items(items.clone(), &src.to_string());
+    if message.items_delta.len() > 0 {
+        let items = message.items_delta.clone();
+        let added = memory.add_items(items.clone(), &src.to_string()).await;
 
-    if items.len() > 0 {
-        send_gossip_ack(node_name, &items, &src.to_string(), &local_addr, socket.clone()).await;
+        if added.iter().count() > 0 {
+            info!(
+                "node={}; Added {} items from {}",
+                node_name, added.iter().count(), &src
+            );
+            send_gossip_ack(node_name, &items, &src.to_string(), &local_addr, socket.clone()).await;
+        } else {
+            debug!(
+                "node={}; No new items added from {}",
+                node_name, &src
+            );
+        }
     }
 
     // Data sync
@@ -233,7 +251,7 @@ pub async fn receive_gossip(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    debug!("node={}; Received {:?} from {:?}:{:?}", node_name, message, src.ip(), src.port());
+                    info!("node={}; Message Received {:?} from {:?}:{:?}", node_name, message, src.ip(), src.port());
                     handle_main_message(&node_name, &src, socket.clone(), sync_flag.clone(), message, memory.clone()).await;
                 };
 
@@ -241,7 +259,7 @@ pub async fn receive_gossip(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    debug!("node={}; Received {:?} from {:?}:{:?}", node_name, message, src.ip(), src.port());
+                    info!("node={}; Message Received {:?} from {:?}:{:?}", node_name, message, src.ip(), src.port());
                     handle_item_delta_message(&src, message, memory.clone()).await;
                 };
             }
@@ -309,6 +327,7 @@ pub async fn send_gossip(
             let next_nodes = memory.next_nodes(gossip_count);
             send_gossip_helper(&node_name, &next_nodes, &mut memory, sync_flag.clone(), false, &socket).await;
 
+            info!("node={}; Node: {:?}", node_name, &memory.get_node(&local_addr));
             info!("node={}; Known peers: {:?}", node_name, &memory.other_peers());
             info!("node={}; Item count: {}", node_name, &memory.items_count().await);
             info!("node={}; Delta Cache size: {}", node_name, &memory.items_delta_cache.iter().count());

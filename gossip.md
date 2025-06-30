@@ -18,13 +18,16 @@
 
 * receive gossip
 
-
+## Concepts
 
 * Adding Items:
-When an item is added, it’s inserted into items, items_delta, and items_delta_cache.
+When an item is added, it’s inserted into the store, items_delta, and items_delta_cache.
+
 Delta State:
 When sending deltas, you call add_delta_state, which adds the peer(s) to peers_pending for each item.
+
 * Acknowledgment:
 When a node receives an ACK, it removes the sender from peers_pending. If peers_pending is empty, the item is removed from items_delta and items_delta_state.
+
 * Sending Deltas:
 get_delta_for_node determines which items to send to each peer, using items_delta and items_delta_cache.

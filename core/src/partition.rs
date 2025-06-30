@@ -9,7 +9,7 @@ use crate::node::NodeId;
 pub type VNode = u16;
 type Key = String;
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct PartitionMap {
     vnode_replicas: HashMap<VNode, Vec<NodeId>>, // RF > 1
     vnode_count: u16,

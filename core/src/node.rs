@@ -60,23 +60,20 @@ pub struct NodeMemory {
     pub all_peers: HashMap<NodeId, Node>,
     pub node_hlc: HLC,
     store: Box<dyn Store>,
-    // items: HashMap<ItemId, ItemEntry>,
-    // item_partitions: HashMap<VNode, HashMap<ItemId, ItemEntry>>,
-    // pub items_delta: HashMap<ItemId, ItemEntry>,
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
     pub items_delta_cache: TtlCache<ItemId, DeltaOrigin>,
     pub index: BTreeMap<HLC, HashSet<String>>,
     pub next_node_index: u8,
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct Node {
     pub address: String,
     pub web_port: u16,
     pub last_seen: u64,
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct ClusterConfig {
     pub cluster_size: u16,
     pub partition_count: u16,
@@ -150,7 +147,8 @@ impl NodeMemory {
     }
 
     pub async fn get_item(&self, item_id: &ItemId) -> Option<ItemEntry> {
-        self.store.get(&VNode::default(), item_id)
+        let vnode = self.partition_map.hash_key(item_id);
+        self.store.get(&vnode, item_id)
             .await
     }
 
@@ -190,6 +188,10 @@ impl NodeMemory {
         self.all_peers.len() as u16
     }
 
+    pub fn get_node(&self, node_id: &String) -> Option<Node> {
+        self.all_peers.get(node_id).cloned()
+    }
+
     pub fn all_peers(&self) -> HashMap<String, Node> {
         self.all_peers.clone()
     }
@@ -212,66 +214,42 @@ impl NodeMemory {
         }
     }
 
-    // Also invalidate delta state for the item
     pub async fn add_item(&mut self, entry: ItemEntry, from_node: &str) -> Option<ItemEntry> {
         let vnode = self.partition_map.hash_key(&entry.item.id);
         if let Some(existing_entry) = self.store.get(&vnode, &entry.item.id).await {
-            match existing_entry.status {
-                ItemStatus::Active => {
-                    // Update the item
-                    if entry.hlc > existing_entry.hlc {
-                        let new_entry = ItemEntry {
-                            item: entry.item.clone(),
-                            status: ItemStatus::Active,
-                            hlc: HLC::merge(&existing_entry.hlc, &entry.hlc, now_millis()),
-                        };
+            if entry.hlc > existing_entry.hlc {
+                let new_entry = ItemEntry {
+                    item: entry.item.clone(),
+                    status: entry.status.clone(),
+                    hlc: HLC::merge(&existing_entry.hlc, &entry.hlc, now_millis()),
+                };
 
-                        match self.index.get_mut(&new_entry.hlc) {
-                            Some(set) => {
-                                // If the set already exists, we just add the item id
-                                set.insert(new_entry.item.id.clone());
-                            }
-                            None => {
-                                // If the set does not exist, we create a new one
-                                let mut set = HashSet::new();
-                                set.insert(new_entry.item.id.clone());
-                                self.index.insert(new_entry.hlc.clone(), set);
-                            }
-                        }
+                self.store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
+                info!("Updated item {} with new entry: {:?}", entry.item.id, &new_entry);
 
-                        self.store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
-                        // Update the delta and cache
-                        self.items_delta_cache.insert(
-                            entry.item.id.clone(),
-                            DeltaOrigin {
-                                node_id: from_node.to_string(),
-                                item_hlc: new_entry.hlc.clone(),
-                            },
-                            Duration::from_secs(60)
-                        );
-                        self.invalidate_delta_state(&entry.item.id);
+                // Update the delta and cache
+                self.items_delta_cache.insert(
+                    entry.item.id.clone(),
+                    DeltaOrigin {
+                        node_id: from_node.to_string(),
+                        item_hlc: new_entry.hlc.clone(),
+                    },
+                    Duration::from_secs(60)
+                );
+                self.invalidate_delta_state(&entry.item.id);
 
-                        Some(new_entry.clone())
-                    } else {
-                        // If the new entry is older or equal, we do nothing
-                        None
-                    }
-                }
-                ItemStatus::Tombstone(_) => {
-                    // If it was a tombstone, we do nothing, it means the item was deleted and update comes out of order
-                    // TODO: maybe we should remove it from the index?
-                    None
-                }
+                Some(new_entry.clone())
+            } else {
+                // If the new entry is older we do nothing
+                info!("Received an update for item {} that is older or equal to the existing entry, ignoring it. Incoming {:?} vs Existing {:?}", entry.item.id, &entry.hlc, &existing_entry.hlc);
+                None
             }
         } else {
             // Add new item
             let new_entry = entry.clone();
             self.store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
+            info!("Added new item {}: {:?}", entry.item.id, &new_entry);
 
-            let mut set = HashSet::new();
-            set.insert(new_entry.item.id.clone());
-            self.index.insert(new_entry.hlc.clone(), set);
-            
             // Add to delta cache
             self.items_delta_cache.insert(
                 entry.item.id.clone(),
@@ -367,14 +345,27 @@ impl NodeMemory {
         items
     }
 
-    pub async fn remove_item(&mut self, item_id: &String) -> bool {
+    pub async fn remove_item(&mut self, item_id: &String, from_node: &str) -> bool {
         let vnode = self.partition_map.hash_key(item_id);
 
-        if let Some(item_entry) = self.store.get(&vnode, item_id).await {
-            let mut new_item_entry = item_entry.clone();
-            new_item_entry.status = ItemStatus::Tombstone(now_millis());
+        if let Some(existing_entry) = self.store.get(&vnode, item_id).await {
+            let mut new_item_entry = existing_entry.clone();
+            let now_millis = now_millis();
+            new_item_entry.status = ItemStatus::Tombstone(now_millis);
+            new_item_entry.hlc.tick_hlc(now_millis);
 
             self.store.add(&vnode, item_id.clone(), new_item_entry.clone()).await;
+
+            // Update the delta and cache
+            self.items_delta_cache.insert(
+                item_id.clone(),
+                DeltaOrigin {
+                    node_id: from_node.to_string(),
+                    item_hlc: new_item_entry.hlc.clone(),
+                },
+                Duration::from_secs(60)
+            );
+            self.invalidate_delta_state(&item_id);
             return true;
         } else {
             return false; // Node not found
