@@ -51,13 +51,14 @@ pub async fn start_node(web_addr: String, local_addr: String, node_memory: Arc<M
 }
 
 pub type NodeId = String;
+pub type Peers = HashMap<NodeId, Node>;
 
 pub struct NodeMemory {
     pub this_node: NodeId,
     pub this_node_web_port: u16,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
-    pub all_peers: HashMap<NodeId, Node>,
+    pub all_peers: Peers,
     pub node_hlc: HLC,
     store: Box<dyn Store>,
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
@@ -144,6 +145,20 @@ impl NodeMemory {
 
         node.partition_map.assign(&node.all_peers.keys().cloned().collect::<Vec<_>>());
         node
+    }
+
+    pub fn take_peers(&mut self, peers: Peers) {
+        let peer_with_port_zero = peers.iter().filter(|x| x.1.web_port == 0).last().map(|(peer_id, _)| peer_id.clone());
+
+        let port_with_port_zero = peer_with_port_zero.clone()
+            .and_then(|peer_id| self.all_peers.get(&peer_id).map(|p| p.web_port));
+
+        self.all_peers = peers;
+        if let (Some(node_id), Some(port)) = (peer_with_port_zero, port_with_port_zero) {
+            if let Some(node) = self.all_peers.get_mut(&node_id) {
+                node.web_port = port;
+            }
+        }
     }
 
     pub async fn get_item(&self, item_id: &ItemId) -> Option<ItemEntry> {
