@@ -147,17 +147,18 @@ impl NodeMemory {
         node
     }
 
-    pub fn take_peers(&mut self, peers: Peers) {
-        let peer_with_port_zero = peers.iter().filter(|x| x.1.web_port == 0).last().map(|(peer_id, _)| peer_id.clone());
-
-        let port_with_port_zero = peer_with_port_zero.clone()
-            .and_then(|peer_id| self.all_peers.get(&peer_id).map(|p| p.web_port));
-
-        self.all_peers = peers;
-        if let (Some(node_id), Some(port)) = (peer_with_port_zero, port_with_port_zero) {
-            if let Some(node) = self.all_peers.get_mut(&node_id) {
-                node.web_port = port;
-            }
+    pub fn take_peers(&mut self, peers: &Peers) {
+        for (addr, node) in peers.iter() {
+            self.all_peers
+                .entry(addr.clone())
+                .and_modify(|existing| {
+                    // Keep the most recent last_seen
+                    // Do not update node from remote if web_port = 0
+                    if node.last_seen > existing.last_seen && node.web_port != 0 {
+                        *existing = node.clone();
+                    }
+                })
+                .or_insert_with(|| node.clone());
         }
     }
 
@@ -182,6 +183,7 @@ impl NodeMemory {
             .unwrap_or_else(|| self.this_node.clone());
 
         self.next_node_index = self.next_node_index.wrapping_add(1);
+        info!("Selected next node to gossip: {:?}", &selected_peer);
         selected_peer
     }
     
@@ -192,6 +194,7 @@ impl NodeMemory {
         for _ in 0..max_count {
             selected_next.push(self.next_node());
         }
+
         selected_next
     }
 

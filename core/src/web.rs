@@ -3,12 +3,9 @@ use crate::node::NodeMemory;
 use crate::now_millis;
 use crate::item::{Item, ItemEntry, ItemStatus, ItemSubmit, ItemSubmitResponse};
 use std::net::SocketAddr;
-use bincode::de;
-use log::info;
+use log::{error,info};
 use serde::Serialize;
 use uuid::Uuid;
-use warp::http::Response;
-use warp::hyper::Body;
 
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -97,12 +94,21 @@ async fn handle_post_task(
         return Ok(warp::reply::json(&response));
     }
 
-    let routed_node = memory.partition_map.route(&item_id);
+    let routed_node = memory.partition_map.route(&memory.this_node, &item_id);
     info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
     if let Some(node) = routed_node {
         if memory.this_node != *node {
             let this_host: SocketAddr = node.parse().unwrap();
-            let web_host = format!("{}:{}", this_host.ip(), 3002);
+            let this_host_ip = this_host.ip().to_string();
+            let mut nodes = memory.other_peers().clone();
+            nodes.retain(|k, _| k == &node);
+
+            if nodes.is_empty() {
+                error!("Node for router address not found: {}, known nodes: {:?}", &this_host_ip, &nodes);
+            }
+            let router_web_port = nodes.iter().last().unwrap().1.web_port;
+
+            let web_host = format!("{}:{}", this_host.ip(), &router_web_port);
             info!("Routing item to remote node: {}", web_host);
             let new_item = ItemSubmit {
                 message: item.message.clone(),
@@ -163,7 +169,7 @@ async fn handle_get_task(
     let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let memory = memory.lock().await;
 
-    let routed_node = memory.partition_map.route(&item_id);
+    let routed_node = memory.partition_map.route(&memory.this_node, &item_id);
     info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
 
     if let Some(item) = memory.get_item(&item_id).await {
@@ -205,7 +211,7 @@ async fn handle_remove_task(
     let this_node = memory.get_node(&this_node_addr).unwrap();
     let is_success = memory.remove_item(&item_id.to_string(), &this_node_addr).await;
 
-    let routed_node = memory.partition_map.route(&item_id);
+    let routed_node = memory.partition_map.route(&memory.this_node, &item_id);
     info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
 
     let response: ItemSubmitResponse;

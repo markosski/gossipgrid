@@ -77,11 +77,15 @@ impl PartitionMap {
         (h.finish() % self.vnode_count as u64) as VNode
     }
 
-    pub fn route(&self, key: &str) -> Option<&NodeId> {
+    pub fn route(&self, this_node: &NodeId, key: &str) -> Option<NodeId> {
         let vnode = self.hash_key(key);
         self.vnode_replicas.get(&vnode).and_then(|replicas| {
-            let mut random = rand::rng();
-            replicas.get(random.next_u32() as usize % replicas.len())
+            if replicas.contains(this_node) {
+                Some(this_node.clone())
+            } else {
+                let mut random = rand::rng();
+                replicas.get(random.next_u32() as usize % replicas.len()).cloned()
+            }
         })
     }
 

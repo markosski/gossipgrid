@@ -9,4 +9,4 @@ ID=`curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3002/items 
 sleep $INTERVAL
 curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3003/items -d '{"message": "foo3"}'
 sleep $INTERVAL
-curl -H "Content-Type: application/json" -XPATCH "http://127.0.0.1:3002/items/${ID}" -d '{"message": "foo4"}'
+curl -H "Content-Type: application/json" -XPUT "http://127.0.0.1:3002/items/${ID}" -d '{"message": "foo4"}'

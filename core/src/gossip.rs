@@ -142,7 +142,9 @@ async fn handle_main_message(node_name: &str, src: &SocketAddr, socket: Arc<UdpS
             if membership_changed || partition_map_changed || config_changed {
                 memory.node_hlc =
                     HLC::merge(&memory.node_hlc, &message.node_hlc, now_millis());
-                memory.take_peers(message.all_peers.clone());
+                memory.take_peers(&message.all_peers);
+
+
                 memory.partition_map = message.partition_map.clone();
                 memory.cluster_config = message.cluster_config.clone();
                 info!(
