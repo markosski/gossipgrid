@@ -5,7 +5,7 @@ use crate::store::memory_store::InMemoryStore;
 use crate::store::Store;
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
-use log::info;
+use log::{error, info};
 use names::Generator;
 use ttl_cache::TtlCache;
 
@@ -19,11 +19,12 @@ use tokio::sync::Mutex;
 const DELTA_STATE_EXPIRY: Duration = Duration::from_secs(60);
 
 // Main entry point for the node
-pub async fn start_node(web_addr: String, local_addr: String, node_memory: Arc<Mutex<NodeMemory>>) {
-    // Generate name for this node
-    let mut generator = Generator::default();
-    let node_name = generator.next().unwrap();
+pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<Mutex<NodeState>>) {
     let sync_flag = Arc::new(Mutex::new(true));
+    let node_name = {
+        let node_state = node_state.lock().await;
+        node_state.name().clone()
+    };
 
     info!(name=node_name.as_str(); "node={}; Starting application: {}", &node_name, &local_addr);
 
@@ -32,39 +33,80 @@ pub async fn start_node(web_addr: String, local_addr: String, node_memory: Arc<M
 
     // Fire and forget gossip tasks
     let _ = tokio::spawn(send_gossip(
-        node_name.clone(),
         local_addr.clone(),
         socket.clone(),
-        node_memory.clone(),
+        node_state.clone(),
         sync_flag.clone(),
     ));
     let _ = tokio::spawn(receive_gossip(
-        node_name.clone(),
         socket.clone(),
-        node_memory.clone(),
+        node_state.clone(),
         sync_flag.clone(),
     ));
 
     // Initiate HTTP server
     info!(name=node_name.as_str(); "node={}; Starting Web Server: {}", &node_name, &web_addr);
-    web::web_server(web_addr.clone(), socket.clone(), node_memory.clone()).await;
+    web::web_server(web_addr.clone(), socket.clone(), node_state.clone()).await;
 }
 
 pub type NodeId = String;
 pub type Peers = HashMap<NodeId, Node>;
 
-pub struct NodeMemory {
-    pub this_node: NodeId,
-    pub this_node_web_port: u16,
+#[derive(Debug)]
+pub enum NodeState {
+    PreJoin(PreJoinNode),
+    JoinedSyncing(JoinedNode),
+    Joined(JoinedNode),
+    Disconnected(DisconnectedNode),
+}
+
+#[derive(Debug)]
+pub struct DisconnectedNode {
+    pub name: String,
+    pub address: NodeId,
+    pub web_port: u16,
+    pub node_hlc: HLC,
+}
+
+#[derive(Debug)]
+pub struct PreJoinNode {
+    pub name: String,
+    pub address: NodeId,
+    pub web_port: u16,
+    pub peer_node: String,
+    pub node_hlc: HLC,
+}
+
+pub struct JoinedNode {
+    pub name: String,
+    pub address: NodeId,
+    pub web_port: u16,
+    pub all_peers: Peers,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
-    pub all_peers: Peers,
     pub node_hlc: HLC,
     store: Box<dyn Store>,
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
     pub items_delta_cache: TtlCache<ItemId, DeltaOrigin>,
     pub index: BTreeMap<HLC, HashSet<String>>,
     pub next_node_index: u8,
+}
+
+// Manual Debug implementation for JoinedNode, skipping the store field
+impl std::fmt::Debug for JoinedNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JoinedNode")
+            .field("all_peers", &self.all_peers)
+            .field("cluster_config", &self.cluster_config)
+            .field("partition_map", &self.partition_map)
+            .field("this_node", &self.address)
+            .field("this_node_web_port", &self.web_port)
+            .field("node_hlc", &self.node_hlc)
+            .field("items_delta_state", &self.items_delta_state)
+            .field("index", &self.index)
+            .field("next_node_index", &self.next_node_index)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Encode, Decode, PartialEq)]
@@ -76,7 +118,7 @@ pub struct Node {
 
 #[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct ClusterConfig {
-    pub cluster_size: u16,
+    pub cluster_size: u8,
     pub partition_count: u16,
     pub replication_factor: u8,
 }
@@ -95,13 +137,14 @@ pub struct DeltaOrigin {
     pub item_hlc: HLC,
 }
 
-impl NodeMemory {
+impl NodeState {
     pub fn init(
         local_addr: String,
         local_web_port: u16,
         seed_peer: Option<String>,
-        cluster_config: ClusterConfig,
-    ) -> NodeMemory {
+        cluster_config: Option<ClusterConfig>,
+    ) -> NodeState {
+        let mut generator = Generator::default();
         let mut known_peers = HashMap::new();
         known_peers.insert(
             local_addr.clone(),
@@ -112,7 +155,7 @@ impl NodeMemory {
             },
         );
 
-        if let Some(peer) = seed_peer {
+        if let Some(peer) = &seed_peer {
             known_peers.insert(
                 peer.clone(),
                 Node {
@@ -123,49 +166,96 @@ impl NodeMemory {
             );
         }
 
-        let mut node = NodeMemory {
-            this_node: local_addr,
-            this_node_web_port: local_web_port,
-            cluster_config: cluster_config.clone(),
-            partition_map: PartitionMap::new(
-                &cluster_config.partition_count,
-                &cluster_config.replication_factor,
-            ),
-            all_peers: known_peers,
-            node_hlc: HLC {
-                timestamp: 0, // Initialize HLC with zero timestamp otherwise new node will be seen as source of truth for cluster state
-                counter: 0,
-            },
+        let node_name = generator.next().unwrap();
+
+        if let Some(cluster_config) = &cluster_config {
+            let mut node = JoinedNode {
+                name: node_name,
+                all_peers: known_peers.clone(),
+                cluster_config: cluster_config.clone(),
+                partition_map: PartitionMap::new(
+                    &cluster_config.partition_count,
+                    &cluster_config.replication_factor,
+                ),
+                address: local_addr,
+                web_port: local_web_port,
+                node_hlc: HLC {
+                    timestamp: 0, // Initialize HLC with zero timestamp otherwise new node will be seen as source of truth for cluster state
+                    counter: 0,
+                },
+                store: Box::new(InMemoryStore::new()),
+                index: BTreeMap::new(),
+                items_delta_state: HashMap::new(),
+                items_delta_cache: TtlCache::new(10000),
+                next_node_index: 0,
+            };
+            node.partition_map.assign(&node.all_peers.keys().cloned().collect::<Vec<_>>());
+            NodeState::Joined(node)
+        } else if let Some(peer_address) = seed_peer {
+            NodeState::PreJoin(PreJoinNode {
+                name: node_name,
+                address: local_addr,
+                web_port: local_web_port,
+                peer_node: peer_address.clone(),
+                node_hlc: HLC {
+                    timestamp: 0, // Initialize HLC with zero timestamp otherwise new node will be seen as source of truth for cluster state
+                    counter: 0,
+                },
+            })
+        } else {
+            panic!("NodeState must be initialized with either a cluster config or a seed peer address");
+        }
+    }
+
+    pub fn address(&self) -> Option<&String> {
+        match self {
+            NodeState::Joined(joined_node) => Some(&joined_node.address),
+            NodeState::PreJoin(pre_join_node) => Some(&pre_join_node.address),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &String {
+        match self {
+            NodeState::PreJoin(pre_join_node) => &pre_join_node.name,
+            NodeState::JoinedSyncing(joined_node) => &joined_node.name,
+            NodeState::Joined(joined_node) => &joined_node.name,
+            NodeState::Disconnected(disconnected_node) => &disconnected_node.name,
+        }
+    }
+}
+
+impl PreJoinNode {
+    pub fn get_address(&self) -> &String {
+        &self.address
+    }
+
+    pub fn get_peer_node(&self) -> &String {
+        &self.peer_node
+    }
+
+    pub fn to_joined_state(&mut self, cluster_config: ClusterConfig, partition_map: PartitionMap) -> JoinedNode {
+        JoinedNode {
+            name: self.name.clone(),
+            address: self.address.clone(),
+            web_port: self.web_port,
+            all_peers: HashMap::new(),
+            cluster_config,
+            partition_map,
+            node_hlc: self.node_hlc.clone(),
             store: Box::new(InMemoryStore::new()),
             index: BTreeMap::new(),
             items_delta_state: HashMap::new(),
             items_delta_cache: TtlCache::new(10000),
             next_node_index: 0,
-        };
-
-        node.partition_map.assign(&node.all_peers.keys().cloned().collect::<Vec<_>>());
-        node
-    }
-
-    pub fn take_peers(&mut self, peers: &Peers) {
-        for (addr, node) in peers.iter() {
-            self.all_peers
-                .entry(addr.clone())
-                .and_modify(|existing| {
-                    // Keep the most recent last_seen
-                    // Do not update node from remote if web_port = 0
-                    if node.last_seen > existing.last_seen && node.web_port != 0 {
-                        *existing = node.clone();
-                    }
-                })
-                .or_insert_with(|| node.clone());
         }
     }
+}
 
-    pub async fn get_item(&self, item_id: &ItemId) -> Option<ItemEntry> {
-        let vnode = self.partition_map.hash_key(item_id);
-        self.store.get(&vnode, item_id)
-            .await
+
+impl JoinedNode {
+    pub fn get_address(&self) -> &String {
+        &self.address
     }
 
     pub fn gossip_count(&self) -> u8 {
@@ -174,13 +264,13 @@ impl NodeMemory {
 
     pub fn next_node(&mut self) -> String {
         let other_peers = self.other_peers();
-        let mut nodes: Vec<String> = other_peers.keys().cloned().collect();
+        let mut nodes: Vec<&String> = other_peers.keys().cloned().collect();
         nodes.sort();
 
         let selected_peer = nodes
             .get(self.next_node_index as usize % other_peers.len())
             .cloned()
-            .unwrap_or_else(|| self.this_node.clone());
+            .unwrap_or_else(|| self.get_address()).clone();
 
         self.next_node_index = self.next_node_index.wrapping_add(1);
         info!("Selected next node to gossip: {:?}", &selected_peer);
@@ -202,22 +292,20 @@ impl NodeMemory {
         self.cluster_size() == self.cluster_config.cluster_size
     }
 
-    pub fn cluster_size(&self) -> u16 {
-        self.all_peers.len() as u16
+    pub fn cluster_size(&self) -> u8 {
+        self.all_peers.len() as u8
     }
 
-    pub fn get_node(&self, node_id: &String) -> Option<Node> {
-        self.all_peers.get(node_id).cloned()
+    pub fn get_node(&self, node_id: &String) -> Option<&Node> {
+        self.all_peers.get(node_id)
     }
 
-    pub fn all_peers(&self) -> HashMap<String, Node> {
-        self.all_peers.clone()
+    pub fn all_peers(&self) -> &HashMap<String, Node> {
+        &self.all_peers
     }
 
-    pub fn other_peers(&self) -> HashMap<String, Node> {
-        let mut other_peers = self.all_peers.clone();
-        other_peers.remove(&self.this_node);
-        other_peers
+    pub fn other_peers(&self) -> HashMap<&String, &Node> {
+        self.all_peers.iter().filter(|k| k.0 != &self.address).collect()
     }
 
     pub fn add_node(&mut self, node: Node) {
@@ -226,13 +314,15 @@ impl NodeMemory {
     }
 
     pub fn remove_node(&mut self, node_id: &String) {
-        if self.all_peers.get(node_id).is_some() {
-            self.all_peers.remove(node_id);
+        if self.all_peers.remove(node_id).is_some() {
             self.node_hlc.tick_hlc(now_millis());
+        } else {
+            error!("Node {} not found in all peers", node_id);
         }
     }
 
-    pub async fn add_item(&mut self, entry: ItemEntry, from_node: &str) -> Option<ItemEntry> {
+
+    async fn add_item(&mut self, entry: ItemEntry, from_node: &str) -> Option<ItemEntry> {
         let vnode = self.partition_map.hash_key(&entry.item.id);
         if let Some(existing_entry) = self.store.get(&vnode, &entry.item.id).await {
             if entry.hlc > existing_entry.hlc {
@@ -280,6 +370,7 @@ impl NodeMemory {
 
             Some(new_entry.clone())
         }
+
     }
 
     pub async fn add_items(&mut self, items: Vec<ItemEntry>, from_node: &str) -> Vec<ItemEntry> {
@@ -390,6 +481,31 @@ impl NodeMemory {
         }
     }
 
+    pub fn take_peers(&mut self, peers: &Peers, joining_cluster: bool) {
+        for (addr, node) in peers.iter() {
+            self.all_peers
+                .entry(addr.clone())
+                .and_modify(|existing| {
+                    // Keep the most recent last_seen
+                    if node.last_seen > existing.last_seen {
+                        *existing = node.clone();
+                    }
+                })
+                .or_insert_with(|| node.clone());
+        }
+
+        if joining_cluster {
+            // If we are joining the cluster, we need to update the partition map
+            self.partition_map.assign(&self.all_peers.keys().cloned().collect::<Vec<_>>());
+            self.node_hlc.tick_hlc(now_millis());
+        }
+    }
+
+    pub async fn get_item(&self, item_id: &ItemId) -> Option<ItemEntry> {
+        let vnode = self.partition_map.hash_key(item_id);
+        self.store.get(&vnode, item_id).await
+    }
+
     pub async fn items_count(&self) -> usize {
         self.store.count().await
     }
@@ -424,7 +540,7 @@ mod tests {
             replication_factor: 2,
         };
 
-        let mut memory = NodeMemory::init("127.0.0.1:1000".to_string(), 3001, None, cluster_config);
+        let mut memory = NodeState::init("127.0.0.1:1000".to_string(), 3001, None, Some(cluster_config));
         
         let item1 = ItemEntry {
             item: Item {
@@ -445,26 +561,30 @@ mod tests {
             hlc: HLC { timestamp: 101, counter: 0 },
         };
 
-        memory.add_items(vec!(item1.clone(), item2.clone()), "nodeA").await;
-        memory.add_delta_state(&[item1.clone(), item2.clone()], DeltaAckState {
-            peers_pending: ["nodeA".to_string()].iter().cloned().collect(),
-            created_at: now_millis(),
-        });
 
-        let vnode = memory.partition_map.hash_key(&item1.item.id);
-        let item1_timestamp = memory.store.get(&vnode, &item1.item.id).await.unwrap().hlc.timestamp;
-        
-        memory.reconcile_delta_state("nodeA".to_string(), &[ItemEntry {
-            item: Item {
-                id: "task1".to_string(),
-                message: "task1 message".to_string(),
-                submitted_at: 100,
-            },
-            status: ItemStatus::Active,
-            hlc: HLC { timestamp: item1_timestamp, counter: 0 },
-        }]).await;
+        match &mut memory {
+            NodeState::Joined(joined_node) => {
+                joined_node.add_items(vec!(item1.clone(), item2.clone()), "nodeA").await;
+                joined_node.add_delta_state(&[item1.clone(), item2.clone()], DeltaAckState {
+                    peers_pending: ["nodeA".to_string()].iter().cloned().collect(),
+                    created_at: now_millis(),
+                });
+                let vnode = joined_node.partition_map.hash_key(&item1.item.id);
+                let item1_timestamp = joined_node.store.get(&vnode, &item1.item.id).await.unwrap().hlc.timestamp;
+                
+                joined_node.reconcile_delta_state("nodeA".to_string(), &[ItemEntry {
+                    item: Item {
+                        id: "task1".to_string(),
+                        message: "task1 message".to_string(),
+                        submitted_at: 100,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC { timestamp: item1_timestamp, counter: 0 },
+                }]).await;
 
-        assert_eq!(memory.store.delta_count().await, 1);
-
+                assert_eq!(joined_node.store.delta_count().await, 1);
+            }
+            _ => panic!("Node is not in Joined state"),
+        }
     }
 }

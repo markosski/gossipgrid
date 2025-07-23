@@ -22,5 +22,6 @@ bincode =  { version = "2.0.0", features = ["serde"] }
 ttl_cache = { version = "0.5.1" }
 async-trait = { version = "*" }
 reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4.5.41", features = ["derive"] }
 
 [dev-dependencies]

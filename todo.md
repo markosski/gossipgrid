@@ -7,8 +7,18 @@ RECENTLY DONE
 * Implemented record updates via endpoint
 * when adding items, ocasionally there is a deadlock
     - issue was with hardcoded web port to 3002 and routing logic issue
+* when node is only aware of another node, do not remove it from cluster, try to connect to it indefinitely
+* create cli
 
 TODO
+* rejection join to cluster that is full
+* partition map does not recalculate to include newly joined node
 * ensure when retrieving an item for VNODE we also check active Nodes 
+* ensure all web endpoints have proxy
+* take a second look at the delta sync
 * when item is deleted it does not properly propagate
 * cluster replicas don't seem to be evenly distributed
+* create a most robust mechanisms for syncing items when node re-joins
+    - ensure efficiency, micro batch mode with ack tracking and rejection of upstream updates
+* consider creating cluster config ahead of time instead of forming it on the fly
+* make it so client provide a key instead of it being generated

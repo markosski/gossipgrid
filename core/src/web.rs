@@ -1,11 +1,10 @@
 use crate::gossip::{HLC, send_gossip_single};
-use crate::node::NodeMemory;
+use crate::node::{self, JoinedNode, Node, NodeState};
 use crate::now_millis;
 use crate::item::{Item, ItemEntry, ItemStatus, ItemSubmit, ItemSubmitResponse};
 use std::net::SocketAddr;
 use log::{error,info};
 use serde::Serialize;
-use uuid::Uuid;
 
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -14,8 +13,8 @@ use warp::Filter;
 
 // HTTP server implementation
 fn with_memory(
-    memory: Arc<Mutex<NodeMemory>>,
-) -> impl Filter<Extract = (Arc<Mutex<NodeMemory>>,), Error = std::convert::Infallible> + Clone {
+    memory: Arc<Mutex<NodeState>>,
+) -> impl Filter<Extract = (Arc<Mutex<NodeState>>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || memory.clone())
 }
 
@@ -72,231 +71,284 @@ pub async fn proxy_request<T : Serialize>(
 async fn handle_post_task(
     item: ItemSubmit,
     socket: Arc<UdpSocket>,
-    memory: Arc<Mutex<NodeMemory>>,
+    memory: Arc<Mutex<NodeState>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let item_entry: ItemEntry;
-    let item_id = match item.id {
-        Some(id) => id,
-        None => {
-            info!("Item ID not provided, generating a new one");
-            Uuid::new_v4().to_string()
-        }
-    };
-
     let mut memory = memory.lock().await;
-    let response: ItemSubmitResponse;
+    match &mut *memory {
+        node::NodeState::Joined(node) => {
+            let item_entry: ItemEntry;
+            let response: ItemSubmitResponse;
 
-    if !memory.is_cluster_formed() {
-        response = ItemSubmitResponse {
-            success: None,
-            error: Some(format!("Cluster not formed")),
-        };
-        return Ok(warp::reply::json(&response));
-    }
-
-    let routed_node = memory.partition_map.route(&memory.this_node, &item_id);
-    info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
-    if let Some(node) = routed_node {
-        if memory.this_node != *node {
-            let this_host: SocketAddr = node.parse().unwrap();
-            let this_host_ip = this_host.ip().to_string();
-            let mut nodes = memory.other_peers().clone();
-            nodes.retain(|k, _| k == &node);
-
-            if nodes.is_empty() {
-                error!("Node for router address not found: {}, known nodes: {:?}", &this_host_ip, &nodes);
+            if !node.is_cluster_formed() {
+                response = ItemSubmitResponse {
+                    success: None,
+                    error: Some(format!("Cluster not formed")),
+                };
+                return Ok(warp::reply::json(&response));
             }
-            let router_web_port = nodes.iter().last().unwrap().1.web_port;
 
-            let web_host = format!("{}:{}", this_host.ip(), &router_web_port);
-            info!("Routing item to remote node: {}", web_host);
-            let new_item = ItemSubmit {
-                message: item.message.clone(),
-                id: Some(item_id.clone()),
-            };
-            response = proxy_request(&web_host, "items", ProxyMethod::Post, Some(&new_item)).await.unwrap();
-        } else {
-            info!("Routing to this node");
-            let now = now_millis();
+            let routed_node = node.partition_map.route(&node.address, &item.id);
+            info!("this node: {}, routed node: {:?}", &node.address, &routed_node);
+            if let Some(node_address) = routed_node {
+                if node.address != *node_address {
+                    let this_host: SocketAddr = node_address.parse().unwrap();
+                    let this_host_ip = this_host.ip().to_string();
+                    let mut nodes = node.other_peers().clone();
+                    nodes.retain(|k, _| *k == &node_address);
 
-            let item = Item {
-                id: item_id.to_string(),
-                message: item.message.clone(),
-                submitted_at: now.clone(),
-            };
+                    if nodes.is_empty() {
+                        error!("Node for router address not found: {}, known nodes: {:?}", &this_host_ip, &nodes);
+                    }
+                    let router_web_port = nodes.iter().last().unwrap().1.web_port;
 
-            item_entry = ItemEntry {
-                item: item,
-                status: ItemStatus::Active,
-                hlc: HLC {
-                    timestamp: now.clone(),
-                    counter: 0,
-                },
-            };
-            let this_node = memory.this_node.clone();
-            memory.add_items(vec!(item_entry.clone()), &this_node).await;
+                    let web_host = format!("{}:{}", this_host.ip(), &router_web_port);
+                    info!("Routing item to remote node: {}", web_host);
+                    response = proxy_request(&web_host, "items", ProxyMethod::Post, Some(&item)).await.unwrap();
+                } else {
+                    info!("Routing to this node");
+                    let now = now_millis();
 
-            // TODO: send to all replicas
-            send_gossip_single(
-                &this_node,
-                &vec![item_entry],
-                None,
-                socket.clone(),
-                &mut memory,
-                false,
-            )
-            .await;
+                    let item = Item {
+                        id: item.id.clone(),
+                        message: item.message.clone(),
+                        submitted_at: now.clone(),
+                    };
 
-            response = ItemSubmitResponse {
-                success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
-                error: None,
-            };
+                    item_entry = ItemEntry {
+                        item: item.clone(),
+                        status: ItemStatus::Active,
+                        hlc: HLC {
+                            timestamp: now.clone(),
+                            counter: 0,
+                        },
+                    };
+                    let this_node = node.address.clone();
+                    node.add_items(vec!(item_entry.clone()), &this_node).await;
+
+                    // TODO: send to all replicas
+                    send_gossip_single(
+                        None,
+                        socket.clone(),
+                        node,
+                        false,
+                    ).await;
+
+                    response = ItemSubmitResponse {
+                        success: Some(vec![("id".to_string(), item.id.clone())].into_iter().collect()),
+                        error: None,
+                    };
+                }
+            } else {
+                response = ItemSubmitResponse {
+                    success: None,
+                    error: Some(format!("Could not route to node, cluster not ready")),
+                };
+            }
+
+            return Ok(warp::reply::json(&response));
         }
-    } else {
-        response = ItemSubmitResponse {
-            success: None,
-            error: Some(format!("Could not route to node, cluster not ready")),
-        };
+        _ => {
+            let response = ItemSubmitResponse {
+                success: None,
+                error: Some(format!("Cannot submit item in current state")),
+            };
+            return Ok(warp::reply::json(&response));
+        }
     }
-
-    return Ok(warp::reply::json(&response));
 }
 
 async fn handle_get_task(
     req_path: String,
-    memory: Arc<Mutex<NodeMemory>>,
+    memory: Arc<Mutex<NodeState>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let memory = memory.lock().await;
 
-    let routed_node = memory.partition_map.route(&memory.this_node, &item_id);
-    info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
+    match &*memory {
+        node::NodeState::Joined(node) => {
+            let item_id = req_path.split('/').last().unwrap_or_default().to_string();
 
-    if let Some(item) = memory.get_item(&item_id).await {
-        let response = ItemSubmitResponse {
-            success: Some(vec![("item".to_string(), format!("{:?}", item))].into_iter().collect()),
-            error: None,
-        };
-        Ok(warp::reply::json(&response))
-    } else {
-        let response = ItemSubmitResponse {
-            success: None,
-            error: Some(format!("Task not found: {}", item_id)),
-        };
-        Ok(warp::reply::json(&response))
+            let routed_node = node.partition_map.route(&node.address, &item_id);
+            info!("this node: {}, routed node: {:?}", &node.address, &routed_node);
+
+            if let Some(item) = node.get_item(&item_id).await {
+                match item.status {
+                    ItemStatus::Active => {
+                        let response = ItemSubmitResponse {
+                            success: Some(vec![("item".to_string(), format!("{:?}", item))].into_iter().collect()),
+                            error: None,
+                        };
+                        Ok(warp::reply::json(&response))
+                    },
+                    ItemStatus::Tombstone(_) => {
+                        let response = ItemSubmitResponse {
+                            success: None,
+                            error: Some(format!("Task not found: {}", item_id)),
+                        };
+                        Ok(warp::reply::json(&response))
+                    }
+                }
+            } else {
+                let response = ItemSubmitResponse {
+                    success: None,
+                    error: Some(format!("Task not found: {}", item_id)),
+                };
+                Ok(warp::reply::json(&response))
+            }
+        }
+        _ => {
+            let response = ItemSubmitResponse {
+                success: None,
+                error: Some(format!("Cannot get item in current state")),
+            };
+            return Ok(warp::reply::json(&response));
+        }
     }
 }
 
 async fn handle_get_tasks_count(
-    memory: Arc<Mutex<NodeMemory>>,
+    memory: Arc<Mutex<NodeState>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let memory = memory.lock().await;
-    let tasks_count = memory.items_count().await;
 
-    let response = ItemSubmitResponse {
-        success: Some(vec![("count".to_string(), tasks_count.to_string())].into_iter().collect()),
-        error: None,
-    };
-
-    Ok(warp::reply::json(&response))
+    match &*memory {
+        node::NodeState::Joined(node) => {
+            let tasks_count = node.items_count().await;
+            let response = ItemSubmitResponse {
+                success: Some(vec![("count".to_string(), tasks_count.to_string())].into_iter().collect()),
+                error: None,
+            };
+            Ok(warp::reply::json(&response))
+        },
+        _ => {
+            let response = ItemSubmitResponse {
+                success: None,
+                error: Some(format!("Cannot get items count in current state")),
+            };
+            Ok(warp::reply::json(&response))
+        }
+    }
 }
 
 async fn handle_remove_task(
     req_path: String,
-    memory: Arc<Mutex<NodeMemory>>,
+    memory: Arc<Mutex<NodeState>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let mut memory = memory.lock().await;
-    let this_node_addr = memory.this_node.clone();
-    let this_node = memory.get_node(&this_node_addr).unwrap();
-    let is_success = memory.remove_item(&item_id.to_string(), &this_node_addr).await;
 
-    let routed_node = memory.partition_map.route(&memory.this_node, &item_id);
-    info!("this node: {}, routed node: {:?}", &memory.this_node, &routed_node);
+    match &mut *memory {
+        node::NodeState::Joined(node) => {
+            let item_id = req_path.split('/').last().unwrap_or_default().to_string();
+            let this_node_addr = node.get_address().clone();
+            let this_node = node.get_node(&this_node_addr).unwrap().clone();
+            let is_success = node.remove_item(&item_id.to_string(), &this_node_addr).await;
 
-    let response: ItemSubmitResponse;
-    if let Some(node) = routed_node {
-        if memory.this_node != *node {
-            let this_host: SocketAddr = node.parse().unwrap();
-            let web_host = format!("{}:{}", this_host.ip(), this_node.web_port);
-            info!("Routing item to remote node: {}", web_host);
+            let routed_node = node.partition_map.route(&node.address, &item_id);
+            info!("this node: {}, routed node: {:?}", &node.address, &routed_node);
 
-            response = proxy_request::<()>(&web_host, format!("items/{}", item_id).as_str(), ProxyMethod::Delete, None).await.unwrap();
-        } else {
-            if is_success {
-                response = ItemSubmitResponse {
-                    success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
-                    error: None,
-                };
+            let response: ItemSubmitResponse;
+            if let Some(node_address) = routed_node {
+                if node.address != *node_address {
+                    let this_host: SocketAddr = node_address.parse().unwrap();
+                    let web_host = format!("{}:{}", this_host.ip(), this_node.web_port);
+                    info!("Routing item to remote node: {}", web_host);
+
+                    response = proxy_request::<()>(&web_host, format!("items/{}", item_id).as_str(), ProxyMethod::Delete, None).await.unwrap();
+                } else {
+                    if is_success {
+                        response = ItemSubmitResponse {
+                            success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
+                            error: None,
+                        };
+                    } else {
+                        response = ItemSubmitResponse {
+                            success: None,
+                            error: Some(format!("Task not found: {}", item_id)),
+                        };
+                    }
+                }
             } else {
                 response = ItemSubmitResponse {
                     success: None,
-                    error: Some(format!("Task not found: {}", item_id)),
+                    error: Some(format!("Could not route to node, cluster not ready")),
                 };
             }
-        }
-    } else {
-        response = ItemSubmitResponse {
-            success: None,
-            error: Some(format!("Could not route to node, cluster not ready")),
-        };
-    }
 
-    Ok(warp::reply::json(&response))
+            Ok(warp::reply::json(&response))
+        }
+        _ => {
+            let response = ItemSubmitResponse {
+                success: None,
+                error: Some(format!("Cannot remove item in current state")),
+            };
+            Ok(warp::reply::json(&response))
+        }
+    }
 }
 
 async fn handle_update_task(
     item: ItemSubmit,
     req_path: String,
-    memory: Arc<Mutex<NodeMemory>>,
+    memory: Arc<Mutex<NodeState>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let mut memory = memory.lock().await;
-    let this_node = memory.this_node.clone();
-    let response: ItemSubmitResponse;
 
-    if memory.get_item(&item_id).await.is_some() {
-        let new_item_entry = ItemEntry {
-            item: Item {
-                id: item_id.to_string(),
-                message: item.message.clone(),
-                submitted_at: now_millis(),
-            },
-            status: ItemStatus::Active,
-            hlc: HLC {
-                timestamp: now_millis(),
-                counter: 0,
-            },
-        };
+    match &mut *memory {
+        node::NodeState::Joined(node) => {
+            let response: ItemSubmitResponse;
 
-        memory.add_items(vec!(new_item_entry.clone()), &this_node).await;
-        response = ItemSubmitResponse {
-            success: Some(vec![("message".to_string(), "Task updated".to_string()), ("id".to_string(), item_id.clone())].into_iter().collect()),
-            error: None,
-        };
-    } else {
-        response = ItemSubmitResponse {
-            success: None,
-            error: Some(format!("Item not found: {}", item_id)),
-        };
+            if node.get_item(&item_id).await.is_some() {
+                let new_item_entry = ItemEntry {
+                    item: Item {
+                        id: item_id.to_string(),
+                        message: item.message.clone(),
+                        submitted_at: now_millis(),
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC {
+                        timestamp: now_millis(),
+                        counter: 0,
+                    },
+                };
+
+                let node_address = node.get_address().clone();
+                node.add_items(vec!(new_item_entry.clone()), &node_address).await;
+                response = ItemSubmitResponse {
+                    success: Some(vec![("message".to_string(), "Task updated".to_string()), ("id".to_string(), item_id.clone())].into_iter().collect()),
+                    error: None,
+                };
+            } else {
+                response = ItemSubmitResponse {
+                    success: None,
+                    error: Some(format!("Item not found: {}", item_id)),
+                };
+            }
+
+            Ok(warp::reply::json(&response))
+        },
+        _ => {
+            let response = ItemSubmitResponse {
+                success: None,
+                error: Some(format!("Cannot update item in current state")),
+            };
+            Ok(warp::reply::json(&response))
+        }
     }
-
-    Ok(warp::reply::json(&response))
 }
 
 pub async fn web_server(
     local_web_addr: String,
     socket: Arc<UdpSocket>,
-    memory: Arc<Mutex<NodeMemory>>,
+    memory: Arc<Mutex<NodeState>>,
 ) {
-    let post_item = warp::path("items")
+    let post_item = warp::path!("items")
         .and(warp::post())
         .and(warp::body::json())
         .and(with_socket(socket.clone()))
         .and(with_memory(memory.clone()))
         .and_then(handle_post_task);
 
-    let get_items_count = warp::path("items")
+    let get_items_count = warp::path!("items")
         .and(warp::get())
         .and(with_memory(memory.clone()))
         .and_then(handle_get_tasks_count);
@@ -315,7 +367,7 @@ pub async fn web_server(
         .and(warp::put())
         .and(with_memory(memory.clone()))
         .and(warp::body::json())
-        .and_then(|req_path: String, memory: Arc<Mutex<NodeMemory>>, item: ItemSubmit| {
+        .and_then(|req_path: String, memory: Arc<Mutex<NodeState>>, item: ItemSubmit| {
             handle_update_task(item, req_path, memory)
         });
 
@@ -334,8 +386,8 @@ mod tests {
         let client = reqwest::Client::new();
 
         let payload = ItemSubmit {
+            id: "123".to_string(),
             message: "Test item".to_string(),
-            id: None
         };
 
         let req = client.post(format!("http://127.0.0.1:3002/items"))

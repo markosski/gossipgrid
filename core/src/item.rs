@@ -38,8 +38,8 @@ pub enum ItemStatus {
 
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct ItemSubmit {
+    pub id: ItemId,
     pub message: String,
-    pub id: Option<ItemId>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

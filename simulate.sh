@@ -3,10 +3,10 @@ set -x
 INTERVAL=1
 ID=NONE
 
-curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3001/items -d '{"message": "foo1"}'
+curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3001/items -d '{"id": "123", "message": "foo1"}'
 sleep $INTERVAL
-ID=`curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3002/items -d '{"message": "foo2"}' | jq -r '.success.id'`
+curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3002/items -d '{"id": "124", "message": "foo2"}'
 sleep $INTERVAL
-curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3003/items -d '{"message": "foo3"}'
+curl -H "Content-Type: application/json" -XPOST http://127.0.0.1:3003/items -d '{"id": "125", "message": "foo3"}'
 sleep $INTERVAL
-curl -H "Content-Type: application/json" -XPUT "http://127.0.0.1:3002/items/${ID}" -d '{"message": "foo4"}'
+curl -H "Content-Type: application/json" -XPUT http://127.0.0.1:3002/items/123 -d '{"message": "foo4"}'
