@@ -1,14 +1,16 @@
+use crate::env::Env;
 use crate::gossip::{HLC, send_gossip_single};
 use crate::node::{self, JoinedNode, Node, NodeState};
-use crate::now_millis;
-use crate::item::{Item, ItemEntry, ItemStatus, ItemSubmit, ItemSubmitResponse};
+use crate::{now_millis, store};
+use crate::item::{Item, ItemEntry, ItemStatus, ItemSubmit, ItemSubmitResponse, ItemUpdate};
+use std::env;
 use std::net::SocketAddr;
 use log::{error,info};
 use serde::Serialize;
 
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use warp::Filter;
 
 // HTTP server implementation
@@ -22,6 +24,12 @@ fn with_socket(
     socket: Arc<UdpSocket>,
 ) -> impl Filter<Extract = (Arc<UdpSocket>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || socket.clone())
+}
+
+fn with_env(
+    env: Arc<Box<dyn Env>>,
+) -> impl Filter<Extract = (Arc<Box<dyn Env>>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || env.clone())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +80,7 @@ async fn handle_post_task(
     item: ItemSubmit,
     socket: Arc<UdpSocket>,
     memory: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let mut memory = memory.lock().await;
     match &mut *memory {
@@ -123,7 +132,10 @@ async fn handle_post_task(
                         },
                     };
                     let this_node = node.address.clone();
-                    node.add_items(vec!(item_entry.clone()), &this_node).await;
+                    {
+                        let store = env.get_store().write().await;
+                        node.add_items(vec!(item_entry.clone()), &this_node, store).await;
+                    }
 
                     // TODO: send to all replicas
                     send_gossip_single(
@@ -131,6 +143,7 @@ async fn handle_post_task(
                         socket.clone(),
                         node,
                         false,
+                        env.clone()
                     ).await;
 
                     response = ItemSubmitResponse {
@@ -160,6 +173,7 @@ async fn handle_post_task(
 async fn handle_get_task(
     req_path: String,
     memory: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let memory = memory.lock().await;
 
@@ -170,7 +184,9 @@ async fn handle_get_task(
             let routed_node = node.partition_map.route(&node.address, &item_id);
             info!("this node: {}, routed node: {:?}", &node.address, &routed_node);
 
-            if let Some(item) = node.get_item(&item_id).await {
+            let store_ref = env.get_store().read().await;
+
+            if let Some(item) = node.get_item(&item_id, &store_ref).await {
                 match item.status {
                     ItemStatus::Active => {
                         let response = ItemSubmitResponse {
@@ -207,12 +223,13 @@ async fn handle_get_task(
 
 async fn handle_get_tasks_count(
     memory: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let memory = memory.lock().await;
 
     match &*memory {
         node::NodeState::Joined(node) => {
-            let tasks_count = node.items_count().await;
+            let tasks_count = node.items_count(&env.get_store().read().await).await;
             let response = ItemSubmitResponse {
                 success: Some(vec![("count".to_string(), tasks_count.to_string())].into_iter().collect()),
                 error: None,
@@ -232,6 +249,7 @@ async fn handle_get_tasks_count(
 async fn handle_remove_task(
     req_path: String,
     memory: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let mut memory = memory.lock().await;
 
@@ -240,7 +258,7 @@ async fn handle_remove_task(
             let item_id = req_path.split('/').last().unwrap_or_default().to_string();
             let this_node_addr = node.get_address().clone();
             let this_node = node.get_node(&this_node_addr).unwrap().clone();
-            let is_success = node.remove_item(&item_id.to_string(), &this_node_addr).await;
+            let is_success = node.remove_item(&item_id.to_string(), &this_node_addr, &mut env.get_store().write().await).await;
 
             let routed_node = node.partition_map.route(&node.address, &item_id);
             info!("this node: {}, routed node: {:?}", &node.address, &routed_node);
@@ -286,9 +304,10 @@ async fn handle_remove_task(
 }
 
 async fn handle_update_task(
-    item: ItemSubmit,
+    item: ItemUpdate,
     req_path: String,
     memory: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let item_id = req_path.split('/').last().unwrap_or_default().to_string();
     let mut memory = memory.lock().await;
@@ -297,7 +316,7 @@ async fn handle_update_task(
         node::NodeState::Joined(node) => {
             let response: ItemSubmitResponse;
 
-            if node.get_item(&item_id).await.is_some() {
+            if node.get_item(&item_id, &env.get_store().read().await).await.is_some() {
                 let new_item_entry = ItemEntry {
                     item: Item {
                         id: item_id.to_string(),
@@ -312,7 +331,7 @@ async fn handle_update_task(
                 };
 
                 let node_address = node.get_address().clone();
-                node.add_items(vec!(new_item_entry.clone()), &node_address).await;
+                node.add_items(vec!(new_item_entry.clone()), &node_address, env.get_store().write().await).await;
                 response = ItemSubmitResponse {
                     success: Some(vec![("message".to_string(), "Task updated".to_string()), ("id".to_string(), item_id.clone())].into_iter().collect()),
                     error: None,
@@ -340,39 +359,45 @@ pub async fn web_server(
     local_web_addr: String,
     socket: Arc<UdpSocket>,
     memory: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>,
 ) {
     let post_item = warp::path!("items")
         .and(warp::post())
         .and(warp::body::json())
         .and(with_socket(socket.clone()))
         .and(with_memory(memory.clone()))
+        .and(with_env(env.clone()))
         .and_then(handle_post_task);
 
     let get_items_count = warp::path!("items")
         .and(warp::get())
         .and(with_memory(memory.clone()))
+        .and(with_env(env.clone()))
         .and_then(handle_get_tasks_count);
 
     let get_item = warp::path!("items" / String)
         .and(warp::get())
         .and(with_memory(memory.clone()))
+        .and(with_env(env.clone()))
         .and_then(handle_get_task);
 
     let remove_item = warp::path!("items" / String)
         .and(warp::delete())
         .and(with_memory(memory.clone()))
+        .and(with_env(env.clone()))
         .and_then(handle_remove_task);
 
-    let update_item = warp::path!("items" / String)
-        .and(warp::put())
-        .and(with_memory(memory.clone()))
-        .and(warp::body::json())
-        .and_then(|req_path: String, memory: Arc<Mutex<NodeState>>, item: ItemSubmit| {
-            handle_update_task(item, req_path, memory)
-        });
+    // let update_item = warp::path!("items" / String)
+    //     .and(warp::put())
+    //     .and(with_memory(memory.clone()))
+    //     .and(with_env(env.clone()))
+    //     .and(warp::body::json())
+    //     .and_then(|req_path: String, memory: Arc<Mutex<NodeState>>, item: ItemUpdate| {
+    //         handle_update_task(item, req_path, memory, env)
+    //     });
 
     let address = local_web_addr.parse::<SocketAddr>().unwrap();
-    warp::serve(post_item.or(get_item).or(get_items_count).or(remove_item).or(update_item))
+    warp::serve(post_item.or(get_item).or(get_items_count).or(remove_item))
         .run(address)
         .await;
 }

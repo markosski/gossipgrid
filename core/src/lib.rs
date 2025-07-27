@@ -7,6 +7,8 @@ pub mod partition;
 pub mod web;
 pub mod store;
 pub mod cli;
+pub mod event;
+pub mod env;
 
 pub fn now_millis() -> u64 {
     SystemTime::now()

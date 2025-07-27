@@ -42,6 +42,11 @@ pub struct ItemSubmit {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+pub struct ItemUpdate {
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ItemSubmitResponse {
     pub success: Option<HashMap<String, String>>,

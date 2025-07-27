@@ -1,17 +1,20 @@
+use crate::env::Env;
 use crate::item::ItemEntry;
 use crate::node::{self, ClusterConfig, DeltaAckState, JoinedNode, Node, NodeState, PreJoinNode};
 use crate::partition::PartitionMap;
+use crate::store::Store;
 use crate::{now_millis};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::mem;
+use std::env;
 use std::net::SocketAddr;
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLockWriteGuard;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -138,7 +141,14 @@ pub async fn send_gossip_ack(
     );
 }
 
-async fn handle_join_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag: Arc<Mutex<bool>>, message: GossipJoinMessage, state: Arc<Mutex<NodeState>>) {
+async fn handle_join_message(
+    src: &SocketAddr, 
+    socket: Arc<UdpSocket>, 
+    sync_flag: Arc<Mutex<bool>>, 
+    message: GossipJoinMessage, 
+    state: Arc<Mutex<NodeState>>, 
+    env: Arc<Box<dyn Env>>
+) {
     let mut node_state = state.lock().await;
     let mut peers = HashMap::from([(message.node.address.clone(), message.node.clone())]);
 
@@ -146,6 +156,10 @@ async fn handle_join_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
 
     match &mut *node_state {
         node::NodeState::Joined(node) => {
+            if node.cluster_size() == node.cluster_config.cluster_size {
+                error!("node={}; Cluster is full, cannot join", node.name);
+                return;
+            }
 
             peers.entry(src.to_string()).and_modify(|node| {
                 node.last_seen = now_millis();
@@ -159,6 +173,7 @@ async fn handle_join_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
                 socket.clone(),
                 node,
                 false,
+                env.clone()
             ).await
         }
         _ => {
@@ -169,7 +184,14 @@ async fn handle_join_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
     }
 }
 
-async fn handle_main_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag: Arc<Mutex<bool>>, message: GossipMessage, state: Arc<Mutex<NodeState>>) {
+async fn handle_main_message(
+    src: &SocketAddr, 
+    socket: Arc<UdpSocket>, 
+    sync_flag: Arc<Mutex<bool>>, 
+    message: GossipMessage, 
+    state: Arc<Mutex<NodeState>>,
+    env: Arc<Box<dyn Env>>,
+) {
     let mut node_state = state.lock().await;
     info!("node={}; Message Received {:?} from {:?}:{:?}", node_state.name(), message, src.ip(), src.port());
 
@@ -224,7 +246,7 @@ async fn handle_main_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
             // Update received items and acknowledge
             if message.items_delta.len() > 0 {
                 let items = message.items_delta.clone();
-                let added = this_node.add_items(items.clone(), &src.to_string()).await;
+                let added = this_node.add_items(items.clone(), &src.to_string(), env.get_store().write().await).await;
 
                 if added.iter().count() > 0 {
                     info!(
@@ -246,8 +268,8 @@ async fn handle_main_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
                 let mut items: Vec<ItemEntry> = vec![];
                 let last_seen = &this_node.all_peers.get(&src.to_string()).unwrap().last_seen;
                 let last_seen_hlc = HLC::new().tick_hlc(last_seen.clone());
-                for entry in this_node.items_since(&last_seen_hlc).await {
-                    if let Some(e) = this_node.get_item(&entry.item.id).await {
+                for entry in this_node.items_since(&last_seen_hlc, &env.get_store().read().await).await {
+                    if let Some(e) = this_node.get_item(&entry.item.id, &env.get_store().read().await).await {
                         items.push(e.clone());
                     }
                 }
@@ -262,6 +284,7 @@ async fn handle_main_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
                     socket.clone(),
                     this_node,
                     true,
+                    env.clone()
                 )
                 .await;
             }
@@ -283,13 +306,13 @@ async fn handle_main_message(src: &SocketAddr, socket: Arc<UdpSocket>, sync_flag
     }
 }
 
-async fn handle_item_delta_message(src: &SocketAddr, message: GossipAck, state: Arc<Mutex<NodeState>>) {
+async fn handle_item_delta_message(src: &SocketAddr, message: GossipAck, state: Arc<Mutex<NodeState>>, env: Arc<Box<dyn Env>>) {
     let mut node_state = state.lock().await;
     info!("node={}; Message GossipAck Received {:?} from {:?}:{:?}", node_state.name(), message, src.ip(), src.port());
 
     match &mut *node_state {
         node::NodeState::Joined(node) => {
-            node.reconcile_delta_state(src.to_string(), &message.items_received).await;
+            node.reconcile_delta_state(src.to_string(), &message.items_received, &mut env.get_store().write().await).await;
         }
         _ => {
             error!("node={}; Cannot handle item delta message in current state", src);
@@ -300,8 +323,9 @@ async fn handle_item_delta_message(src: &SocketAddr, message: GossipAck, state: 
 
 pub async fn receive_gossip(
     socket: Arc<UdpSocket>,
-    memory: Arc<Mutex<NodeState>>,
+    node_state: Arc<Mutex<NodeState>>,
     sync_flag: Arc<Mutex<bool>>,
+    env: Arc<Box<dyn Env>>,
 ) {
     let mut buf = [0u8; BUFFER_SIZE];
 
@@ -312,19 +336,19 @@ pub async fn receive_gossip(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    handle_main_message(&src, socket.clone(), sync_flag.clone(), message, memory.clone()).await;
+                    handle_main_message(&src, socket.clone(), sync_flag.clone(), message, node_state.clone(), env.clone()).await;
 
                 } else if let Ok((message, _)) = bincode::decode_from_slice::<GossipJoinMessage, _>(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    handle_join_message(&src, socket.clone(), sync_flag.clone(), message, memory.clone()).await;
+                    handle_join_message(&src, socket.clone(), sync_flag.clone(), message, node_state.clone(), env.clone()).await;
 
                 } else if let Ok((message, _)) = bincode::decode_from_slice::<GossipAck, _>(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    handle_item_delta_message(&src, message, memory.clone()).await;
+                    handle_item_delta_message(&src, message, node_state.clone(), env.clone()).await;
                 };
             }
             Err(e) => {
@@ -337,29 +361,31 @@ pub async fn receive_gossip(
 pub async fn send_gossip_single(
     peer_addr: Option<&String>,
     socket: Arc<UdpSocket>,
-    memory: &mut JoinedNode,
+    node_state: &mut JoinedNode,
     is_sync: bool,
+    env: Arc<Box<dyn Env>>,
 ) {
     let mut peers: Vec<String> = vec!();
     if let Some(peer) = peer_addr {
         peers = vec!(peer.clone());
-    } else if memory.cluster_size() > 1 {
-        peers = memory.next_nodes(memory.gossip_count());
+    } else if node_state.cluster_size() > 1 {
+        peers = node_state.next_nodes(node_state.gossip_count());
     }
 
     // Send gossip to next nodes
-    send_gossip_to_peers(&peers, memory, false, is_sync, &socket).await;
+    send_gossip_to_peers(&peers, node_state, false, is_sync, &socket, env.clone()).await;
 }
 
 pub async fn send_gossip(
     local_addr: String,
     socket: Arc<UdpSocket>,
-    memory: Arc<Mutex<NodeState>>,
+    node_state: Arc<Mutex<NodeState>>,
     sync_flag: Arc<Mutex<bool>>,
+    env: Arc<Box<dyn Env>>,
 ) {
     loop {
         {
-            let mut node_state = memory.lock().await;
+            let mut node_state = node_state.lock().await;
 
             match &mut *node_state {
                 node::NodeState::Joined(this_node) => {
@@ -371,7 +397,7 @@ pub async fn send_gossip(
                     for peer in peers.iter() {
                         if peer.0 != &local_addr
                             && now_millis - peer.1.last_seen > FAILURE_TIMEOUT.as_millis() as u64
-                            && this_node.other_peers().len() > 1
+                            && this_node.other_peers().len() > 0
                         {
                             this_node.remove_node(peer.0);
                             info!(
@@ -392,12 +418,14 @@ pub async fn send_gossip(
                         this_node, 
                         sync_flag.clone(), 
                         false, 
-                        &socket).await;
+                        &socket,
+                        env.clone()
+                    ).await;
 
                     info!("node={}; Node Joined: {:?}", this_node.name, &this_node.address);
                     info!("node={}; Node HLC: {:?}", this_node.name, &this_node.node_hlc);
                     info!("node={}; Known peers: {:?}", this_node.name, &this_node.other_peers());
-                    info!("node={}; Item count: {}", this_node.name, &this_node.items_count().await);
+                    info!("node={}; Item count: {}", this_node.name, &this_node.items_count(&env.get_store().read().await).await);
                     info!("node={}; Delta Cache size: {}", this_node.name, &this_node.items_delta_cache.iter().count());
                     info!("node={}; Delta State size: {}", this_node.name, &this_node.items_delta_state.len());
                     info!("node={}; Vnodes: {:?}", this_node.name, &this_node.partition_map.get_vnodes_for_node(&local_addr));
@@ -444,7 +472,7 @@ async fn send_join_gossip_helper(join_node: &String, node_state: &PreJoinNode, s
         bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
 
     socket.send_to(&encoded, &join_node).await.unwrap();
-    error!("node={}; sent PreJoin message to {}", node_state.name, &join_node);
+    info!("node={}; sent PreJoin message to {}", node_state.name, &join_node);
 
     info!(
         "node={}; sent {:?} to {:?}; sync={}",
@@ -452,12 +480,12 @@ async fn send_join_gossip_helper(join_node: &String, node_state: &PreJoinNode, s
     );
 }
 
-async fn send_gossip_to_peers(next_nodes: &[String], node_state: &mut JoinedNode, sync_flag: bool, is_sync_response: bool, socket: &UdpSocket) {
+async fn send_gossip_to_peers(next_nodes: &[String], node_state: &mut JoinedNode, sync_flag: bool, is_sync_response: bool, socket: &UdpSocket, env: Arc<Box<dyn Env>>) {
     let mut all_delta_count = 0;
 
     let node_hlc = node_state.node_hlc.clone();
     for peer_dest in next_nodes.iter() {
-        let itmes_delta = node_state.get_delta_for_node(&peer_dest).await;
+        let itmes_delta = node_state.get_delta_for_node(&peer_dest, &env.get_store().read().await).await;
         all_delta_count += itmes_delta.len();
         info!("node={}; selected node: {}; sending delta size: {}", node_state.name, &peer_dest, &itmes_delta.len());
 
@@ -485,7 +513,7 @@ async fn send_gossip_to_peers(next_nodes: &[String], node_state: &mut JoinedNode
 
             // Remove delta items if everyone we know has received them
             if all_delta_count == 0 && next_nodes.len() > 0 {
-                node_state.clear_delta().await;
+                node_state.clear_delta(&mut env.get_store().write().await).await;
             }
         }
 

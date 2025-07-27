@@ -1,5 +1,6 @@
+use core::env::Env;
 use core::node::{ClusterConfig, JoinedNode, NodeState};
-use core::{node, partition};
+use core::{env, node};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -13,6 +14,16 @@ async fn main() {
     env_logger::init();
 
     let cli_matched = core::cli::node_cli().get_matches();
+    let env : Arc<Box<dyn Env>> = Arc::new(
+        Box::new(
+            env::EnvDeps::new(
+                Box::new(core::store::memory_store::InMemoryStore::new()),
+                Box::new(core::event::EventPublisherFileLogger {
+                    file_path: "events.log".to_string(),
+                }),
+            )
+        )
+    );
 
     match cli_matched.subcommand() {
         Some(("cluster", sub_matches)) => {
@@ -68,7 +79,7 @@ async fn main() {
                 Some(cluster_config),
             )));
 
-            node::start_node(web_addr, local_addr, node_memory).await;
+            node::start_node(web_addr, local_addr, node_memory, env).await;
         }
         Some(("join", sub_matches)) => {
             let peer_address = sub_matches.get_one::<String>("address").expect("Address is required");
@@ -100,7 +111,7 @@ async fn main() {
                 None,
             )));
 
-            node::start_node(web_addr, local_addr, node_memory).await;
+            node::start_node(web_addr, local_addr, node_memory, env).await;
 
         }
         _ => unreachable!(),
