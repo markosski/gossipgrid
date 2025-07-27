@@ -1,4 +1,3 @@
-use bincode::de;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,11 +34,8 @@ impl EventPublisher for EventPublisherFileLogger {
             .await
             .expect("Failed to open event log file");
 
-        if let Err(e) = file.write_all(msg_json.as_bytes()).await {
+        if let Err(e) = file.write_all((msg_json + "\n").as_bytes()).await {
             eprintln!("Failed to write to event log file: {}", e);
-        }
-        if let Err(e) = file.write_all(b"\n").await {
-            eprintln!("Failed to write newline to event log file: {}", e);
         }
     }
 }

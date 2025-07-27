@@ -15,10 +15,10 @@ RECENTLY DONE
 * rejection join to cluster that is full
 
 TODO
-* delta propagation seems doing some ping/pong action
-* ensure when retrieving an item for VNODE we also check active Nodes 
 * ensure all web endpoints have proxy
+* delta propagation seems doing some ping/pong action
 * take a second look at the delta sync
+* ensure when retrieving an item for VNODE we also check active Nodes 
 * when item is deleted it does not properly propagate
 * cluster replicas don't seem to be evenly distributed
 * create a most robust mechanisms for syncing items when node re-joins

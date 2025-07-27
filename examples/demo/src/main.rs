@@ -1,8 +1,8 @@
 use core::env::Env;
-use core::node::{ClusterConfig, JoinedNode, NodeState};
+use core::node::{ClusterConfig, NodeState};
 use core::{env, node};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{RwLock};
 
 #[tokio::main]
 async fn main() {
@@ -14,15 +14,13 @@ async fn main() {
     env_logger::init();
 
     let cli_matched = core::cli::node_cli().get_matches();
-    let env : Arc<Box<dyn Env>> = Arc::new(
-        Box::new(
-            env::EnvDeps::new(
+    let env : Arc<Env> = Arc::new(
+            env::Env::new(
                 Box::new(core::store::memory_store::InMemoryStore::new()),
                 Box::new(core::event::EventPublisherFileLogger {
                     file_path: "events.log".to_string(),
                 }),
             )
-        )
     );
 
     match cli_matched.subcommand() {
@@ -72,7 +70,7 @@ async fn main() {
                 partition_count: partition_size,
                 replication_factor: replication_factor,
             };
-            let node_memory = Arc::new(Mutex::new(NodeState::init(
+            let node_memory = Arc::new(RwLock::new(NodeState::init(
                 local_addr.clone(),
                 web_port,
                 None,
@@ -104,7 +102,7 @@ async fn main() {
                 &web_port.to_string()
             );
 
-            let node_memory = Arc::new(Mutex::new(NodeState::init(
+            let node_memory = Arc::new(RwLock::new(NodeState::init(
                 local_addr.clone(),
                 web_port,
                 Some(peer_address.clone()),

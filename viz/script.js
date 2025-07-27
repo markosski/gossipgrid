@@ -1,4 +1,7 @@
-d3.json("sample_data.json").then(data => {
+d3.text("events.log").then(raw => {
+  const lines = raw.split("\n").filter(line => line.trim() !== "");
+  console.log(`Loaded ${lines.length} events`);
+  const data = lines.map(line => JSON.parse(line));
   const addresses = Array.from(new Set(data.flatMap(d => [d.address_from, d.address_to])));
   const width = 800, height = 600, radius = 200, centerX = width / 2, centerY = height / 2;
   const angleStep = (2 * Math.PI) / addresses.length;
@@ -82,8 +85,7 @@ d3.json("sample_data.json").then(data => {
         .attr("x", sender.x)
         .attr("y", sender.y - 50)
         .attr("text-anchor", "middle")
-        .attr("fill", "black")
-        .text(messageLabel);
+        .attr("fill", "black");
     } else {
       svg.append("line")
         .attr("class", "msg")
@@ -100,8 +102,7 @@ d3.json("sample_data.json").then(data => {
         .attr("x", (sender.x + receiver.x) / 2)
         .attr("y", (sender.y + receiver.y) / 2 + 20)
         .attr("text-anchor", "middle")
-        .attr("fill", "black")
-        .text(messageLabel);
+        .attr("fill", "black");
     }
   }
 

@@ -1,9 +1,8 @@
 use crate::env::Env;
-use crate::gossip::{receive_gossip, send_gossip, HLC};
+use crate::gossip::{receive_gossip, send_gossip_on_interval, HLC};
 use crate::item::{ItemEntry, ItemId, ItemStatus};
-use crate::partition::{PartitionMap, VNode};
-use crate::store::memory_store::InMemoryStore;
-use crate::store::{self, Store};
+use crate::partition::{PartitionMap};
+use crate::store::{Store};
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
 use log::{error, info};
@@ -20,10 +19,10 @@ use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 const DELTA_STATE_EXPIRY: Duration = Duration::from_secs(60);
 
 // Main entry point for the node
-pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<Mutex<NodeState>>, env: Arc<Box<dyn Env>>) {
+pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<RwLock<NodeState>>, env: Arc<Env>) {
     let sync_flag = Arc::new(Mutex::new(true));
     let node_name = {
-        let node_state = node_state.lock().await;
+        let node_state = node_state.read().await;
         node_state.name().clone()
     };
 
@@ -33,7 +32,7 @@ pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<Mu
     let socket = Arc::new(UdpSocket::bind(&local_addr).await.unwrap());
 
     // Fire and forget gossip tasks
-    let _ = tokio::spawn(send_gossip(
+    let _ = tokio::spawn(send_gossip_on_interval(
         local_addr.clone(),
         socket.clone(),
         node_state.clone(),
@@ -387,8 +386,9 @@ impl JoinedNode {
         added_items
     }
 
-    // The reason why we check each item insead of a batch of items as a whole is that we want to ensure that we only remove the items that are acknowledged by the peer
-    // and not remove items that are still pending acknowledgment, e.g. in case new itmes are added to the delta state.
+    // The reason why we check each item insead of a batch of items as a whole is that we want to ensure 
+    // that we only remove the items that are acknowledged by the peer and not remove items that are still pending acknowledgment, 
+    // e.g. in case new itmes are added to the delta state.
     pub async fn reconcile_delta_state(&mut self, from_node: String, ack_delta_items: &[ItemEntry], store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) {
         for ack_item in ack_delta_items {
             if let Some(delta_ack) = self.items_delta_state.get_mut(&ack_item.item.id) {
