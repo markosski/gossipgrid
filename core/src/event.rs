@@ -2,12 +2,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-    pub node_name: String,
     pub address_from: String,
     pub address_to: String,
     pub message_type: String,
     pub data: serde_json::Value,
-    pub timestamp: u32,
+    pub timestamp: u64,
 }
 
 pub struct EventPublisherFileLogger {

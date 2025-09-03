@@ -133,7 +133,7 @@ async fn handle_post_task(
                     let this_node = node.address.clone();
                     {
                         let store = env.get_store().write().await;
-                        node.add_items(vec!(item_entry.clone()), &this_node, store).await;
+                        node.add_items(&vec!(item_entry), &this_node, store).await;
                     }
 
                     // TODO: send to all replicas
@@ -330,7 +330,7 @@ async fn handle_update_task(
                 };
 
                 let node_address = node.get_address().clone();
-                node.add_items(vec!(new_item_entry.clone()), &node_address, env.get_store().write().await).await;
+                node.add_items(&vec!(new_item_entry), &node_address, env.get_store().write().await).await;
                 response = ItemSubmitResponse {
                     success: Some(vec![("message".to_string(), "Task updated".to_string()), ("id".to_string(), item_id.clone())].into_iter().collect()),
                     error: None,

@@ -77,7 +77,7 @@ async fn main() {
                 Some(cluster_config),
             )));
 
-            node::start_node(web_addr, local_addr, node_memory, env).await;
+            node::start_node(web_addr, local_addr, node_memory, env).await
         }
         Some(("join", sub_matches)) => {
             let peer_address = sub_matches.get_one::<String>("address").expect("Address is required");
@@ -109,9 +109,8 @@ async fn main() {
                 None,
             )));
 
-            node::start_node(web_addr, local_addr, node_memory, env).await;
-
+            node::start_node(web_addr, local_addr, node_memory, env).await
         }
         _ => unreachable!(),
-    }
+    }.expect("Node failed");
 }

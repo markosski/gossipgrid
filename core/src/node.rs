@@ -7,6 +7,7 @@ use crate::{now_millis, web};
 use bincode::{Decode, Encode};
 use log::{error, info};
 use names::Generator;
+use tokio::try_join;
 use ttl_cache::TtlCache;
 
 use std::cmp::min;
@@ -18,28 +19,28 @@ use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 const DELTA_STATE_EXPIRY: Duration = Duration::from_secs(60);
 
-// Main entry point for the node
-pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<RwLock<NodeState>>, env: Arc<Env>) {
-    let sync_flag = Arc::new(Mutex::new(true));
-    let node_name = {
+/// Main entry point for the node
+pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<RwLock<NodeState>>, env: Arc<Env>) -> anyhow::Result<()> {
+    let sync_flag = Arc::new(Mutex::new(false));
+    let node_address = {
         let node_state = node_state.read().await;
-        node_state.name().clone()
+        node_state.get_address().clone()
     };
 
-    info!(name=node_name.as_str(); "node={}; Starting application: {}", &node_name, &local_addr);
+    info!("node={}; Starting application: {}", &node_address, &local_addr);
 
     // Initialize socket
     let socket = Arc::new(UdpSocket::bind(&local_addr).await.unwrap());
 
     // Fire and forget gossip tasks
-    let _ = tokio::spawn(send_gossip_on_interval(
+    let sending = tokio::spawn(send_gossip_on_interval(
         local_addr.clone(),
         socket.clone(),
         node_state.clone(),
         sync_flag.clone(),
         env.clone()
     ));
-    let _ = tokio::spawn(receive_gossip(
+    let receiving = tokio::spawn(receive_gossip(
         socket.clone(),
         node_state.clone(),
         sync_flag.clone(),
@@ -47,8 +48,13 @@ pub async fn start_node(web_addr: String, local_addr: String, node_state: Arc<Rw
     ));
 
     // Initiate HTTP server
-    info!(name=node_name.as_str(); "node={}; Starting Web Server: {}", &node_name, &web_addr);
-    web::web_server(web_addr.clone(), socket.clone(), node_state.clone(), env.clone()).await;
+    info!("node={}; Starting Web Server: {}", &node_address, &web_addr);
+    let web_server = tokio::spawn(web::web_server(web_addr.clone(), socket.clone(), node_state.clone(), env.clone()));
+
+    // Panic if one of the tasks fails
+    try_join!(sending, receiving, web_server)?;
+
+    Ok(())
 }
 
 pub type NodeId = String;
@@ -64,7 +70,6 @@ pub enum NodeState {
 
 #[derive(Debug)]
 pub struct DisconnectedNode {
-    pub name: String,
     pub address: NodeId,
     pub web_port: u16,
     pub node_hlc: HLC,
@@ -72,7 +77,6 @@ pub struct DisconnectedNode {
 
 #[derive(Debug)]
 pub struct PreJoinNode {
-    pub name: String,
     pub address: NodeId,
     pub web_port: u16,
     pub peer_node: String,
@@ -80,21 +84,21 @@ pub struct PreJoinNode {
 }
 
 pub struct JoinedNode {
-    pub name: String,
     pub address: NodeId,
     pub web_port: u16,
     pub all_peers: Peers,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
     pub node_hlc: HLC,
-    // store: Box<dyn Store>,
+    // Stores the items that need to be gossiped to other nodes
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
+    // Stores the origin of the delta item to avoid sending it back to the same node
     pub items_delta_cache: TtlCache<ItemId, DeltaOrigin>,
     pub index: BTreeMap<HLC, HashSet<String>>,
     pub next_node_index: u8,
 }
 
-// Manual Debug implementation for JoinedNode, skipping the store field
+/// Manual Debug implementation for JoinedNode, skipping the store field
 impl std::fmt::Debug for JoinedNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JoinedNode")
@@ -125,14 +129,14 @@ pub struct ClusterConfig {
     pub replication_factor: u8,
 }
 
-// Store acknowledgments for each item and the nodes it wasw sent to
+/// Store acknowledgments for each item and the nodes it wasw sent to
 #[derive(Debug, Clone)]
 pub struct DeltaAckState {
     pub peers_pending: HashSet<String>,
     pub created_at: u64,
 }
 
-// Store the origin node when delta was shared so that we can temporarily cache it
+/// Store the origin node when delta was shared so that we can temporarily cache it
 #[derive(Debug, Clone)]
 pub struct DeltaOrigin {
     pub node_id: NodeId,
@@ -168,11 +172,8 @@ impl NodeState {
             );
         }
 
-        let node_name = generator.next().unwrap();
-
         if let Some(cluster_config) = &cluster_config {
             let mut node = JoinedNode {
-                name: node_name,
                 all_peers: known_peers.clone(),
                 cluster_config: cluster_config.clone(),
                 partition_map: PartitionMap::new(
@@ -195,7 +196,6 @@ impl NodeState {
             NodeState::Joined(node)
         } else if let Some(peer_address) = seed_peer {
             NodeState::PreJoin(PreJoinNode {
-                name: node_name,
                 address: local_addr,
                 web_port: local_web_port,
                 peer_node: peer_address.clone(),
@@ -209,21 +209,19 @@ impl NodeState {
         }
     }
 
-    pub fn address(&self) -> Option<&String> {
+    pub fn get_address(&self) -> &String {
         match self {
-            NodeState::Joined(joined_node) => Some(&joined_node.address),
-            NodeState::PreJoin(pre_join_node) => Some(&pre_join_node.address),
-            _ => None,
+            NodeState::Joined(joined_node) => &joined_node.address,
+            NodeState::JoinedSyncing(joined_node) => &joined_node.address,
+            NodeState::PreJoin(pre_join_node) => &pre_join_node.address,
+            NodeState::Disconnected(disconnected_node) => &disconnected_node.address
         }
     }
+}
 
-    pub fn name(&self) -> &String {
-        match self {
-            NodeState::PreJoin(pre_join_node) => &pre_join_node.name,
-            NodeState::JoinedSyncing(joined_node) => &joined_node.name,
-            NodeState::Joined(joined_node) => &joined_node.name,
-            NodeState::Disconnected(disconnected_node) => &disconnected_node.name,
-        }
+impl DisconnectedNode {
+    pub fn get_address(&self) -> &String {
+        &self.address
     }
 }
 
@@ -238,7 +236,6 @@ impl PreJoinNode {
 
     pub fn to_joined_state(&mut self, cluster_config: ClusterConfig, partition_map: PartitionMap) -> JoinedNode {
         JoinedNode {
-            name: self.name.clone(),
             address: self.address.clone(),
             web_port: self.web_port,
             all_peers: HashMap::new(),
@@ -260,6 +257,7 @@ impl JoinedNode {
         &self.address
     }
 
+    // TODO: consder moving this to gossip module
     pub fn gossip_count(&self) -> u8 {
         min(2, self.cluster_config.replication_factor)
     }
@@ -275,7 +273,7 @@ impl JoinedNode {
             .unwrap_or_else(|| self.get_address()).clone();
 
         self.next_node_index = self.next_node_index.wrapping_add(1);
-        info!("Selected next node to gossip: {:?}", &selected_peer);
+        info!("node={}; Selected next node to gossip: {:?}", self.get_address(), &selected_peer);
         selected_peer
     }
     
@@ -319,7 +317,7 @@ impl JoinedNode {
         if self.all_peers.remove(node_id).is_some() {
             self.node_hlc.tick_hlc(now_millis());
         } else {
-            error!("Node {} not found in all peers", node_id);
+            error!("node={}; Node {} not found in all peers", self.get_address(), node_id);
         }
     }
 
@@ -335,7 +333,7 @@ impl JoinedNode {
                 };
 
                 store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
-                info!("Updated item {} with new entry: {:?}", entry.item.id, &new_entry);
+                info!("node={}; Updated item {} with new entry: {:?}", self.get_address(), entry.item.id, &new_entry);
 
                 // Update the delta and cache
                 self.items_delta_cache.insert(
@@ -351,14 +349,15 @@ impl JoinedNode {
                 Some(new_entry.clone())
             } else {
                 // If the new entry is older we do nothing
-                info!("Received an update for item {} that is older or equal to the existing entry, ignoring it. Incoming {:?} vs Existing {:?}", entry.item.id, &entry.hlc, &existing_entry.hlc);
+                info!("node={}; Received an update for item {} that is older or equal to the existing entry, ignoring it. Incoming {:?} vs Existing {:?}", 
+                    self.get_address(), entry.item.id, &entry.hlc, &existing_entry.hlc);
                 None
             }
         } else {
             // Add new item
             let new_entry = entry.clone();
             store.add(&vnode, entry.item.id.clone(), new_entry.clone()).await;
-            info!("Added new item {}: {:?}", entry.item.id, &new_entry);
+            info!("node={}; Added new item {}: {:?}", self.get_address(), entry.item.id, &new_entry);
 
             // Add to delta cache
             self.items_delta_cache.insert(
@@ -375,7 +374,7 @@ impl JoinedNode {
 
     }
 
-    pub async fn add_items(&mut self, items: Vec<ItemEntry>, from_node: &str, store: RwLockWriteGuard<'_, Box<dyn Store>>) -> Vec<ItemEntry> {
+    pub async fn add_items(&mut self, items: &[ItemEntry], from_node: &str, store: RwLockWriteGuard<'_, Box<dyn Store>>) -> Vec<ItemEntry> {
         let mut added_items = vec![];
         let mut store_ref = store;
         for item in items {
@@ -386,15 +385,18 @@ impl JoinedNode {
         added_items
     }
 
-    // The reason why we check each item insead of a batch of items as a whole is that we want to ensure 
-    // that we only remove the items that are acknowledged by the peer and not remove items that are still pending acknowledgment, 
-    // e.g. in case new itmes are added to the delta state.
+    /// Purge delta state for acknowledged delta items
+    ///
+    /// The reason why we check each item insead of a batch of items as a whole is that we want to ensure 
+    /// that we only remove the items that are acknowledged by the peer and not remove items that are still pending acknowledgment, 
+    /// e.g. in case new itmes are added to the delta state.
     pub async fn reconcile_delta_state(&mut self, from_node: String, ack_delta_items: &[ItemEntry], store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) {
         for ack_item in ack_delta_items {
             if let Some(delta_ack) = self.items_delta_state.get_mut(&ack_item.item.id) {
                 delta_ack.peers_pending.remove(&from_node);
 
                 if delta_ack.peers_pending.is_empty() {
+                    info!("node={}; removing item {} from delta state as all peers have acknowledged it", self.get_address(), &ack_item.item.id);
                     store.remove_delta_item(&ack_item.item.id).await;
                     self.items_delta_state.remove(&ack_item.item.id);
                 }
@@ -402,6 +404,7 @@ impl JoinedNode {
         }
     }
 
+    /// Add new items to delta state
     pub fn add_delta_state(&mut self, items: &[ItemEntry], delta_ack_state: DeltaAckState) {
         for item in items {
             if let Some(delta_ack) = self.items_delta_state.get_mut(&item.item.id) {
@@ -410,16 +413,17 @@ impl JoinedNode {
             } else {
                 self.items_delta_state.insert(item.item.id.clone(), delta_ack_state.clone());
             }
-            info!("Added to delta state for item {}: {:?}", &item.item.id, &delta_ack_state);
+            info!("node={}; Added to delta state for item {}: {:?}", self.get_address(), &item.item.id, &delta_ack_state);
         }
     }
 
-    // Expire state if we received new state for the item
+    /// Expire state if we received new state for the item
     pub fn invalidate_delta_state(&mut self, item_id: &ItemId) {
         self.items_delta_state.remove(item_id);
-        info!("Invalidated delta state for item {}", &item_id);
+        info!("node={}; Invalidated delta state for item {}", self.get_address(), &item_id);
     }
 
+    /// Remove items from delta state after some time
     pub fn cleanup_expired_delta_state(&mut self) {
         let now = now_millis();
         let peers: std::collections::HashSet<_> = self.all_peers.keys().cloned().collect();
@@ -442,8 +446,7 @@ impl JoinedNode {
         self.items_delta_state.clone()
     }
 
-    // for each item
-    // check if item is in the cache for the node and if it is 
+    /// for each item check if item is in the cache for the node and if it is 
     pub async fn get_delta_for_node(&self, node: &NodeId, store: &RwLockReadGuard<'_, Box<dyn Store>>) -> Vec<ItemEntry> {
         let mut items = vec![];
         for item_entry in store.get_all_delta().await.iter() {
@@ -485,6 +488,12 @@ impl JoinedNode {
         }
     }
 
+    /// Updates it's peers with peers from upstream
+    /// 
+    /// # Arguments
+    /// 
+    /// * `joining_cluster` - whether or not we need to update partition map after new node joined the cluster
+    /// 
     pub fn take_peers(&mut self, peers: &Peers, joining_cluster: bool) {
         for (addr, node) in peers.iter() {
             self.all_peers
