@@ -11,7 +11,7 @@ use tokio::try_join;
 use ttl_cache::TtlCache;
 
 use std::cmp::min;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -264,13 +264,13 @@ impl JoinedNode {
 
     pub fn next_node(&mut self) -> String {
         let other_peers = self.other_peers();
-        let mut nodes: Vec<&String> = other_peers.keys().cloned().collect();
+        let mut nodes: Vec<String> = other_peers.keys().cloned().collect();
         nodes.sort();
 
         let selected_peer = nodes
             .get(self.next_node_index as usize % other_peers.len())
             .cloned()
-            .unwrap_or_else(|| self.get_address()).clone();
+            .unwrap_or_else(|| self.get_address().clone());
 
         self.next_node_index = self.next_node_index.wrapping_add(1);
         info!("node={}; Selected next node to gossip: {:?}", self.get_address(), &selected_peer);
@@ -300,12 +300,16 @@ impl JoinedNode {
         self.all_peers.get(node_id)
     }
 
-    pub fn all_peers(&self) -> &HashMap<String, Node> {
-        &self.all_peers
+    pub fn all_peers(&self) -> hash_map::Iter<'_, String, Node> {
+        self.all_peers.iter()
     }
 
-    pub fn other_peers(&self) -> HashMap<&String, &Node> {
-        self.all_peers.iter().filter(|k| k.0 != &self.address).collect()
+    pub fn other_peers(&self) -> HashMap<String, Node> {
+        self.all_peers
+            .iter()
+            .filter(|(k, _)| *k != &self.address)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     pub fn add_node(&mut self, node: Node) {

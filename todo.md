@@ -17,13 +17,13 @@ RECENTLY DONE
     * it seems like the node that sends immediate gossip receives acks properly
         * verify if other nodes only propagate delta through intervals (and if this is intentional), if so see if they are not sending Ack
     * A: this was due to Acks not being always sent if node already received an update from other node
+* ensure all web endpoints have proxy
 
 TODO
-* ensure all web endpoints have proxy
+* when item is deleted it does not properly propagate
 * take a second look at the delta sync for proper implementation, currently sync flag is false 
 * ensure when retrieving an item for VNODE we also check active Nodes 
 * node that is in sync mode should not be used for reads until changes state
-* when item is deleted it does not properly propagate
 * cluster replicas don't seem to be evenly distributed
 * create a most robust mechanisms for syncing items when node re-joins
     - ensure efficiency, micro batch mode with ack tracking and rejection of upstream updates
