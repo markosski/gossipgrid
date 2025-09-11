@@ -1,6 +1,6 @@
-use core::env::Env;
-use core::node::{ClusterConfig, NodeState};
-use core::{env, node};
+use gossipgrid::env::Env;
+pub use gossipgrid::node::{ClusterConfig, NodeState};
+use gossipgrid::{env, node};
 use std::sync::Arc;
 use tokio::sync::{RwLock};
 
@@ -13,11 +13,11 @@ async fn main() {
 
     env_logger::init();
 
-    let cli_matched = core::cli::node_cli().get_matches();
+    let cli_matched = gossipgrid::cli::node_cli().get_matches();
     let env : Arc<Env> = Arc::new(
             env::Env::new(
-                Box::new(core::store::memory_store::InMemoryStore::new()),
-                Box::new(core::event::EventPublisherFileLogger {
+                Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
+                Box::new(gossipgrid::event::EventPublisherFileLogger {
                     file_path: "events.log".to_string(),
                 }),
             )

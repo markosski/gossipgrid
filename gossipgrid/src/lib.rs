@@ -1,10 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub mod gossip;
-pub mod item;
+mod gossip;
+mod item;
+mod web;
 pub mod node;
 pub mod partition;
-pub mod web;
 pub mod store;
 pub mod cli;
 pub mod event;

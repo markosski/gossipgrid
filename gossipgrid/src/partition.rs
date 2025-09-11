@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use crate::node::NodeId;
 
 pub type VNode = u16;
-type Key = String;
 
 #[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct PartitionMap {

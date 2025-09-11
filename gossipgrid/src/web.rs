@@ -49,14 +49,14 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
     method: ProxyMethod,
     body: Option<&T>
 ) -> Result<Option<P>, String> {
-    info!("Proxying request: {}, {:?}, {:?}", url, &method, serde_json::to_string(&body));
+    info!("node={}; Proxying request: {}, {:?}, {:?}", node.get_address(), url, &method, serde_json::to_string(&body));
 
-    let routed_node = node.partition_map.route(&node.address, item_id)
+    let routed_node = node.partition_map.route(node.get_address(), item_id)
         .ok_or("Could not route to node".to_string())?;
-    info!("this node: {}, routed node: {:?}", &node.address, &routed_node);
+    info!("node={}; routed node: {}", &node.address, &routed_node);
 
     if node.get_address() == &routed_node {
-        info!("This is appropriate node, handling locally");
+        info!("node={}; This is appropriate node, handling locally", node.get_address());
         return Ok(None);
     }
 
@@ -66,12 +66,12 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
     nodes.retain(|k, _| k == &routed_node);
 
     if nodes.is_empty() {
-        error!("Node for router address not found: {}, known nodes: {:?}", &this_host.ip(), &nodes);
+        error!("node={}; Node for router address not found: {}, known nodes: {:?}", node.get_address(), &this_host.ip(), &nodes);
     }
 
     let router_web_port = nodes.iter().last().unwrap().1.web_port;
     let web_host = format!("{}:{}", this_host.ip(), &router_web_port);
-    info!("Routing item to remote node: {}", web_host);
+    info!("node={}; Routing item to remote node: {}", node.get_address(), web_host);
 
     let client = reqwest::Client::new();
     let resp_builder = match method {
@@ -134,7 +134,6 @@ async fn handle_post_task(
                         node.add_items(&vec!(item_entry), &this_node, store).await;
                     }
 
-                    // TODO: send to all replicas
                     send_gossip_single(
                         None,
                         socket.clone(),
@@ -256,6 +255,7 @@ async fn handle_get_tasks_count(
 
 async fn handle_remove_task(
     req_path: String,
+    socket: Arc<UdpSocket>,
     memory: Arc<RwLock<NodeState>>,
     env: Arc<Env>
 ) -> Result<impl warp::Reply, warp::Rejection> {
@@ -279,6 +279,14 @@ async fn handle_remove_task(
                             success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
                             error: None,
                         };
+
+                        send_gossip_single(
+                            None,
+                            socket.clone(),
+                            node,
+                            false,
+                            env.clone()
+                        ).await;
                     } else {
                         response = ItemSubmitResponse {
                             success: None,
@@ -402,6 +410,7 @@ pub async fn web_server(
 
     let remove_item = warp::path!("items" / String)
         .and(warp::delete())
+        .and(with_socket(socket.clone()))
         .and(with_memory(memory.clone()))
         .and(with_env(env.clone()))
         .and_then(handle_remove_task);

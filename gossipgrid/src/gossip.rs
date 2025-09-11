@@ -425,7 +425,7 @@ async fn handle_item_delta_message(src: &SocketAddr, message: GossipAck, state: 
                 timestamp: now_millis(),
             }).await;
 
-            node.reconcile_delta_state(src.to_string(), &message.items_received, &mut env.get_store().write().await).await;
+            node.reconcile_delta_state(&src.to_string(), &message.items_received, &mut env.get_store().write().await).await;
         }
         _ => {
             error!("node={}; Cannot handle item delta message in current state", src);

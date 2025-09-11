@@ -6,7 +6,6 @@ use crate::store::{Store};
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
 use log::{error, info};
-use names::Generator;
 use tokio::try_join;
 use ttl_cache::TtlCache;
 
@@ -150,7 +149,6 @@ impl NodeState {
         seed_peer: Option<String>,
         cluster_config: Option<ClusterConfig>,
     ) -> NodeState {
-        let mut generator = Generator::default();
         let mut known_peers = HashMap::new();
         known_peers.insert(
             local_addr.clone(),
@@ -296,7 +294,7 @@ impl JoinedNode {
         self.all_peers.len() as u8
     }
 
-    pub fn get_node(&self, node_id: &String) -> Option<&Node> {
+    pub fn get_node(&self, node_id: &str) -> Option<&Node> {
         self.all_peers.get(node_id)
     }
 
@@ -317,7 +315,7 @@ impl JoinedNode {
         self.node_hlc.tick_hlc(now_millis());
     }
 
-    pub fn remove_node(&mut self, node_id: &String) {
+    pub fn remove_node(&mut self, node_id: &str) {
         if self.all_peers.remove(node_id).is_some() {
             self.node_hlc.tick_hlc(now_millis());
         } else {
@@ -394,10 +392,10 @@ impl JoinedNode {
     /// The reason why we check each item insead of a batch of items as a whole is that we want to ensure 
     /// that we only remove the items that are acknowledged by the peer and not remove items that are still pending acknowledgment, 
     /// e.g. in case new itmes are added to the delta state.
-    pub async fn reconcile_delta_state(&mut self, from_node: String, ack_delta_items: &[ItemEntry], store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) {
+    pub async fn reconcile_delta_state(&mut self, from_node: &str, ack_delta_items: &[ItemEntry], store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) {
         for ack_item in ack_delta_items {
             if let Some(delta_ack) = self.items_delta_state.get_mut(&ack_item.item.id) {
-                delta_ack.peers_pending.remove(&from_node);
+                delta_ack.peers_pending.remove(from_node);
 
                 if delta_ack.peers_pending.is_empty() {
                     info!("node={}; removing item {} from delta state as all peers have acknowledged it", self.get_address(), &ack_item.item.id);
@@ -422,7 +420,7 @@ impl JoinedNode {
     }
 
     /// Expire state if we received new state for the item
-    pub fn invalidate_delta_state(&mut self, item_id: &ItemId) {
+    pub fn invalidate_delta_state(&mut self, item_id: &str) {
         self.items_delta_state.remove(item_id);
         info!("node={}; Invalidated delta state for item {}", self.get_address(), &item_id);
     }
@@ -465,7 +463,7 @@ impl JoinedNode {
         items
     }
 
-    pub async fn remove_item(&mut self, item_id: &String, from_node: &str, store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) -> bool {
+    pub async fn remove_item(&mut self, item_id: &str, from_node: &str, store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) -> bool {
         let vnode = self.partition_map.hash_key(item_id);
 
         if let Some(existing_entry) = store.get(&vnode, item_id).await {
@@ -474,18 +472,18 @@ impl JoinedNode {
             new_item_entry.status = ItemStatus::Tombstone(now_millis);
             new_item_entry.hlc.tick_hlc(now_millis);
 
-            store.add(&vnode, item_id.clone(), new_item_entry.clone()).await;
+            store.add(&vnode, item_id.to_string(), new_item_entry.clone()).await;
 
             // Update the delta and cache
             self.items_delta_cache.insert(
-                item_id.clone(),
+                item_id.to_string(),
                 DeltaOrigin {
                     node_id: from_node.to_string(),
                     item_hlc: new_item_entry.hlc.clone(),
                 },
                 Duration::from_secs(60)
             );
-            self.invalidate_delta_state(&item_id);
+            self.invalidate_delta_state(item_id);
             return true;
         } else {
             return false; // Node not found
@@ -518,7 +516,7 @@ impl JoinedNode {
         }
     }
 
-    pub async fn get_item(&self, item_id: &ItemId, store: &RwLockReadGuard<'_, Box<dyn Store>>) -> Option<ItemEntry> {
+    pub async fn get_item(&self, item_id: &str, store: &RwLockReadGuard<'_, Box<dyn Store>>) -> Option<ItemEntry> {
         let vnode = self.partition_map.hash_key(item_id);
         store.get(&vnode, item_id).await
     }
