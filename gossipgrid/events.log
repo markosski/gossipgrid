@@ -1,0 +1,9 @@
+{"address_from":"127.0.0.1:4010","address_to":"127.0.0.1:4009","message_type":"JoinSent","data":{"sync_request":false,"sync_response":false},"timestamp":1757293926729}
+{"address_from":"127.0.0.1:4009","address_to":"127.0.0.1:4010","message_type":"GossipSent","data":{"delta_size":0,"item_ids":[],"sync_request":false,"sync_response":false},"timestamp":1757293926730}
+{"address_from":"127.0.0.1:4009","address_to":"127.0.0.1:4010","message_type":"GossipReceived","data":{"delta_size":0,"item_ids":[],"sync_request":false,"sync_response":false},"timestamp":1757293926730}
+{"address_from":"127.0.0.1:4009","address_to":"127.0.0.1:4009","message_type":"JoinAccepted","data":{"cluster_size":2,"joined_node":"127.0.0.1:4010","peers":["127.0.0.1:4009","127.0.0.1:4010"]},"timestamp":1757293926730}
+{"address_from":"127.0.0.1:4010","address_to":"127.0.0.1:4010","message_type":"Joined","data":{"cluster_size":2,"peers":["127.0.0.1:4009","127.0.0.1:4010"]},"timestamp":1757293926730}
+{"address_from":"127.0.0.1:4010","address_to":"127.0.0.1:4009","message_type":"JoinSent","data":{"sync_request":false,"sync_response":false},"timestamp":1757295550258}
+{"address_from":"127.0.0.1:4009","address_to":"127.0.0.1:4010","message_type":"GossipSent","data":{"delta_size":0,"item_ids":[],"sync_request":false,"sync_response":false},"timestamp":1757295551260}
+{"address_from":"127.0.0.1:4009","address_to":"127.0.0.1:4010","message_type":"GossipReceived","data":{"delta_size":0,"item_ids":[],"sync_request":false,"sync_response":false},"timestamp":1757295551260}
+{"address_from":"127.0.0.1:4009","address_to":"127.0.0.1:4009","message_type":"JoinAccepted","data":{"cluster_size":2,"joined_node":"127.0.0.1:4010","peers":["127.0.0.1:4009","127.0.0.1:4010"]},"timestamp":1757295551260}

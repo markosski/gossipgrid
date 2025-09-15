@@ -1,0 +1,71 @@
+[
+    {
+        "node_name": "foo",
+        "address_from": "127.0.0.1:4109",
+        "address_to": "127.0.0.1:4109",
+        "message_type": "node_init",
+        "timestamp": "2025-03-08T20:41:48Z"
+    },
+    {
+        "node_name": "bar",
+        "address_from": "127.0.0.1:4110",
+        "address_to": "127.0.0.1:4110",
+        "message_type": "node_init",
+        "timestamp": "2025-03-08T20:41:49Z"
+    },
+    {
+        "node_name": "baz",
+        "address_from": "127.0.0.1:4111",
+        "address_to": "127.0.0.1:4111",
+        "message_type": "node_init",
+        "timestamp": "2025-03-08T20:41:50Z"
+    },
+    {
+        "node_name": "bar",
+        "address_from": "127.0.0.1:4110",
+        "address_to": "127.0.0.1:4109",
+        "message_type": "join",
+        "data": {},
+        "timestamp": "2025-03-08T20:41:52Z"
+    },
+    {
+        "node_name": "foo",
+        "address_from": "127.0.0.1:4109",
+        "address_to": "127.0.0.1:4109",
+        "message_type": "join_accepted",
+        "data": {},
+        "timestamp": "2025-03-08T20:41:55Z"
+    },
+    {
+        "node_name": "foo",
+        "address_from": "127.0.0.1:4109",
+        "address_to": "127.0.0.1:4110",
+        "message_type": "node_state",
+        "data": {"items_delta_count": 0},
+        "timestamp": "2025-03-08T20:41:59Z"
+    },
+    {
+        "node_name": "bar",
+        "address_from": "127.0.0.1:4110",
+        "address_to": "127.0.0.1:4109",
+        "message_type": "node_state",
+        "data": {"items_delta_count": 0},
+        "timestamp": "2025-03-08T20:42:00Z"
+    },
+    {
+        "node_name": "foo",
+        "address_from": "127.0.0.1:4109",
+        "address_to": "127.0.0.1:4110",
+        "message_type": "node_state",
+        "data": {"items_delta_count": 5},
+        "timestamp": "2025-03-08T20:42:05Z"
+    },
+    {
+        "node_name": "bar",
+        "address_from": "127.0.0.1:4110",
+        "address_to": "127.0.0.1:4110",
+        "message_type": "delta_processed",
+        "data": {},
+        "timestamp": "2025-03-08T20:42:06Z"
+    }
+]
