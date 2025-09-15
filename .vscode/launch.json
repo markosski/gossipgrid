@@ -8,16 +8,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in library 'core'",
+            "name": "Debug unit tests in library 'gossipgrid'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=core"
+                    "--package=gossipgrid"
                 ],
                 "filter": {
-                    "name": "core",
+                    "name": "gossipgrid",
                     "kind": "lib"
                 }
             },

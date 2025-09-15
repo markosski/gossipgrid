@@ -46,3 +46,11 @@ curl -XDELETE http://127.0.0.1:3001/items/<ITEM_ID>
 ```bash
 cargo test --lib
 ```
+
+## CLI
+
+```
+gossipgrid cluster 3 --web-port 3001 --node-port 4109
+
+gossipgrid join 127.0.0.1:4109 --wep-port 3002 --node-port 4110
+```

@@ -1,8 +1,6 @@
 
 pub mod memory_store;
 
-use bincode::de;
-
 use crate::{item::ItemEntry, partition::VNode};
 
 #[async_trait::async_trait]
