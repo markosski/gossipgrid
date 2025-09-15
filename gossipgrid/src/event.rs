@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tokio::fs::File;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -9,31 +10,44 @@ pub struct Event {
     pub timestamp: u64,
 }
 
-pub struct EventPublisherFileLogger {
-    pub file_path: String,
-}
-
 #[async_trait::async_trait]
 pub trait EventPublisher: Send + Sync{
-    async fn publish(&self, msg: &Event);
+    async fn publish(&mut self, msg: &Event);
+}
+
+pub struct EventPublisherFileLogger {
+    pub file_path: String,
+    file: File
+}
+
+impl EventPublisherFileLogger {
+    pub async fn new(file_path: String) -> Self {
+        use tokio::fs::OpenOptions;
+
+        tokio::fs::remove_file(&file_path).await.unwrap();
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .await
+            .expect("Failed to open event log file");
+
+        EventPublisherFileLogger {
+            file_path,
+            file: file,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl EventPublisher for EventPublisherFileLogger {
-    async fn publish(&self, msg: &Event) {
-        use tokio::fs::OpenOptions;
+    async fn publish(&mut self, msg: &Event) {
         use tokio::io::AsyncWriteExt;
 
         let msg_json = serde_json::to_string(msg).expect("Failed to serialize event");
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.file_path)
-            .await
-            .expect("Failed to open event log file");
-
-        if let Err(e) = file.write_all((msg_json + "\n").as_bytes()).await {
+        if let Err(e) = self.file.write_all((msg_json + "\n").as_bytes()).await {
             eprintln!("Failed to write to event log file: {}", e);
         }
     }

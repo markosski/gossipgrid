@@ -11,7 +11,7 @@ pub async fn stop_nodes(handles: Vec<tokio::task::JoinHandle<Result<(), anyhow::
     }
 }
 
-pub async fn start_test_cluster() -> Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>> {
+pub async fn start_test_cluster(partition_count: u16, replication_factor: u8) -> Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>> {
 
     let local_addr = "127.0.0.1:4009".to_string();
     let local_addr_2 = "127.0.0.1:4010".to_string();
@@ -23,16 +23,14 @@ pub async fn start_test_cluster() -> Vec<tokio::task::JoinHandle<Result<(), anyh
     let env : Arc<Env> = Arc::new(
         env::Env::new(
             Box::new(InMemoryStore::new()),
-            Box::new(EventPublisherFileLogger {
-                file_path: "events_tests.log".to_string(),
-            }),
+            Box::new(EventPublisherFileLogger::new("events_tests.log".to_string()).await),
         )
     );
 
     let cluster_config = ClusterConfig {
             cluster_size: 3,
-            partition_count: 6,
-            replication_factor: 2,
+            partition_count: partition_count,
+            replication_factor: replication_factor,
         };
     
     let node_memory_1 = Arc::new(RwLock::new(NodeState::init(

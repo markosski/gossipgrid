@@ -1,4 +1,4 @@
-use gossipgrid::env::Env;
+use gossipgrid::{env::Env, event::EventPublisherFileLogger};
 pub use gossipgrid::node::{ClusterConfig, NodeState};
 use gossipgrid::{env, node};
 use std::sync::Arc;
@@ -17,9 +17,7 @@ async fn main() {
     let env : Arc<Env> = Arc::new(
             env::Env::new(
                 Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
-                Box::new(gossipgrid::event::EventPublisherFileLogger {
-                    file_path: "events.log".to_string(),
-                }),
+                Box::new(EventPublisherFileLogger::new("events_tests.log".to_string()).await),
             )
     );
 

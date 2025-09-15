@@ -173,7 +173,7 @@ pub async fn send_gossip_ack(
     let encoded_ack = bincode::encode_to_vec(&ack, bincode::config::standard()).unwrap();
     socket.send_to(&encoded_ack, &peer_addr).await.unwrap();
 
-    env.get_event_publisher().publish(&crate::event::Event {
+    env.get_event_publisher().write().await.publish(&crate::event::Event {
         address_from: local_addr.clone(),
         address_to: peer_addr.clone(),
         message_type: "GossipAckSent".to_string(),
@@ -207,7 +207,7 @@ async fn handle_join_message(
             if node.cluster_size() == node.cluster_config.cluster_size {
                 error!("node={}; Cluster is full, cannot join", &node.address);
 
-                env.get_event_publisher().publish(&crate::event::Event {
+                env.get_event_publisher().write().await.publish(&crate::event::Event {
                     address_from: message.node.address.clone(),
                     address_to: node.get_address().clone(),
                     message_type: "JoinRejected".to_string(),
@@ -237,7 +237,7 @@ async fn handle_join_message(
                 env.clone()
             ).await;
 
-            env.get_event_publisher().publish(&crate::event::Event {
+            env.get_event_publisher().write().await.publish(&crate::event::Event {
                 address_from: node.get_address().clone(),
                 address_to: node.address.clone(),
                 message_type: "JoinAccepted".to_string(),
@@ -268,7 +268,7 @@ async fn handle_main_message(
     let mut node_state = state.write().await;
     info!("node={}; Message Received {:?} from {:?}:{:?}", node_state.get_address(), message, src.ip(), src.port());
 
-    env.get_event_publisher().publish(&crate::event::Event {
+    env.get_event_publisher().write().await.publish(&crate::event::Event {
         address_from: src.to_string(),
         address_to: node_state.get_address().clone(),
         message_type: "GossipReceived".to_string(),
@@ -296,7 +296,7 @@ async fn handle_main_message(
             *node_state = NodeState::Joined(joined_node);
             drop(node_state);
 
-            env.get_event_publisher().publish(&crate::event::Event {
+            env.get_event_publisher().write().await.publish(&crate::event::Event {
                 address_from: address.clone(),
                 address_to: address.clone(),
                 message_type: "Joined".to_string(),
@@ -416,7 +416,7 @@ async fn handle_item_delta_message(src: &SocketAddr, message: GossipAck, state: 
 
     match &mut *node_state {
         node::NodeState::Joined(node) => {
-            env.get_event_publisher().publish(&crate::event::Event {
+            env.get_event_publisher().write().await.publish(&crate::event::Event {
                 address_from: src.to_string(),
                 address_to: node.get_address().clone(),
                 message_type: "GossipAckReceived".to_string(),
@@ -554,7 +554,7 @@ async fn send_join_message(join_node: &String, node_state: &PreJoinNode, sync_fl
     socket.send_to(&encoded, &join_node).await.unwrap();
     info!("node={}; sent PreJoin message to {}", node_state.get_address(), &join_node);
 
-    env.get_event_publisher().publish(&crate::event::Event {
+    env.get_event_publisher().write().await.publish(&crate::event::Event {
         address_from: node_state.address.clone(),
         address_to: join_node.clone(),
         message_type: "JoinSent".to_string(),
@@ -603,7 +603,7 @@ async fn send_gossip_to_peers(next_nodes: &[String], node_state: &mut JoinedNode
             }
         }
 
-        env.get_event_publisher().publish(&crate::event::Event {
+        env.get_event_publisher().write().await.publish(&crate::event::Event {
             address_from: node_state.get_address().clone(),
             address_to: peer_dest.clone(),
             message_type: "GossipSent".to_string(),
