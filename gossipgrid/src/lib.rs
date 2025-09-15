@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod gossip;
-mod item;
 mod web;
+pub mod item;
 pub mod node;
 pub mod partition;
 pub mod store;

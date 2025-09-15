@@ -5,6 +5,7 @@ use crate::partition::PartitionMap;
 use crate::{now_millis, now_seconds};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -22,7 +23,7 @@ const GOSSIP_INTERVAL: Duration = Duration::from_secs(5);
 const FAILURE_TIMEOUT: Duration = Duration::from_secs(15);
 const BUFFER_SIZE: usize = 1024;
 
-#[derive(Debug, Clone, Encode, Decode, Ord, PartialOrd, PartialEq, Eq)]
+#[derive(Debug, Clone, Encode, Decode, Ord, PartialOrd, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HLC {
     pub timestamp: u64,
     pub counter: u64,

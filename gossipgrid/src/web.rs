@@ -196,7 +196,11 @@ async fn handle_get_task(
                     match item.status {
                         ItemStatus::Active => {
                             let response = ItemSubmitResponse {
-                                success: Some(vec![("item".to_string(), format!("{:?}", item))].into_iter().collect()),
+                                success: Some(vec![
+                                    ("item".to_string(), serde_json::to_string(&item).expect("error parsing response"))
+                                    ]
+                                    .into_iter()
+                                    .collect()),
                                 error: None,
                             };
                             Ok(warp::reply::json(&response))
@@ -204,7 +208,7 @@ async fn handle_get_task(
                         ItemStatus::Tombstone(_) => {
                             let response = ItemSubmitResponse {
                                 success: None,
-                                error: Some(format!("Task not found: {}", item_id)),
+                                error: Some(format!("Item not found: {}", item_id)),
                             };
                             Ok(warp::reply::json(&response))
                         }
@@ -212,7 +216,7 @@ async fn handle_get_task(
                 } else {
                     let response = ItemSubmitResponse {
                         success: None,
-                        error: Some(format!("Task not found: {}", item_id)),
+                        error: Some(format!("Item not found: {}", item_id)),
                     };
                     Ok(warp::reply::json(&response))
                 }
@@ -290,7 +294,7 @@ async fn handle_remove_task(
                     } else {
                         response = ItemSubmitResponse {
                             success: None,
-                            error: Some(format!("Task not found: {}", item_id)),
+                            error: Some(format!("Item not found: {}", item_id)),
                         };
                     }
                     Ok(warp::reply::json(&response))
@@ -352,7 +356,7 @@ async fn handle_update_task(
                         let node_address = node.get_address().clone();
                         node.add_items(&vec!(new_item_entry), &node_address, env.get_store().write().await).await;
                         response = ItemSubmitResponse {
-                            success: Some(vec![("message".to_string(), "Task updated".to_string()), ("id".to_string(), item_id.clone())].into_iter().collect()),
+                            success: Some(vec![("message".to_string(), "Item updated".to_string()), ("id".to_string(), item_id.clone())].into_iter().collect()),
                             error: None,
                         };
                     } else {

@@ -6,14 +6,14 @@ use std::collections::HashMap;
 
 pub type ItemId = String;
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct Item {
     pub id: ItemId,
     pub message: String, // Example metadata
     pub submitted_at: u64,
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct ItemEntry {
     pub item: Item,
     pub status: ItemStatus,
@@ -30,7 +30,7 @@ impl ItemEntry {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub enum ItemStatus {
     Active,
     Tombstone(u64),
