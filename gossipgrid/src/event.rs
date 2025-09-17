@@ -24,7 +24,7 @@ impl EventPublisherFileLogger {
     pub async fn new(file_path: String) -> Self {
         use tokio::fs::OpenOptions;
 
-        tokio::fs::remove_file(&file_path).await.unwrap();
+        tokio::fs::remove_file(&file_path).await.ok();
 
         let file = OpenOptions::new()
             .create(true)

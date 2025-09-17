@@ -718,16 +718,23 @@ async fn send_gossip_to_peers(
     let mut all_delta_count = 0;
 
     let node_hlc = node_state.node_hlc.clone();
-    for peer_dest in next_nodes.iter() {
-        let itmes_delta = node_state
-            .get_delta_for_node(&peer_dest, &env.get_store().read().await)
-            .await;
-        all_delta_count += itmes_delta.len();
+    let mut peer_deltas = Vec::with_capacity(next_nodes.len());
+    {
+        let store_guard = env.get_store().read().await;
+        for peer_dest in next_nodes.iter() {
+            let items_delta = node_state.get_delta_for_node(peer_dest, &store_guard).await;
+            all_delta_count += items_delta.len();
+            peer_deltas.push((peer_dest.clone(), items_delta));
+        }
+    }
+
+    // send specific deltas to each peer
+    for (peer_dest, items_delta) in peer_deltas.into_iter() {
         info!(
             "node={}; selected node: {}; sending delta size: {}",
             node_state.get_address(),
             &peer_dest,
-            &itmes_delta.len()
+            &items_delta.len()
         );
 
         let msg = GossipMessage {
@@ -735,7 +742,7 @@ async fn send_gossip_to_peers(
             partition_map: node_state.partition_map.clone(),
             all_peers: node_state.all_peers.clone(),
             node_hlc: node_hlc.clone(),
-            items_delta: itmes_delta.clone(),
+            items_delta: items_delta.clone(),
             sync_request: SyncRequest {
                 is_sync_request: sync_flag,
                 since: HLC::new(),
@@ -748,7 +755,7 @@ async fn send_gossip_to_peers(
 
         if !sync_flag {
             node_state.add_delta_state(
-                &itmes_delta,
+                &items_delta,
                 DeltaAckState {
                     peers_pending: vec![peer_dest.clone()].into_iter().collect(),
                     created_at: now_millis(),
@@ -756,7 +763,7 @@ async fn send_gossip_to_peers(
             );
 
             // Remove delta items if everyone we know has received them
-            if all_delta_count == 0 && next_nodes.len() > 0 {
+            if all_delta_count == 0 && !next_nodes.is_empty() {
                 node_state
                     .clear_delta(&mut env.get_store().write().await)
                     .await;
@@ -771,8 +778,8 @@ async fn send_gossip_to_peers(
                 address_to: peer_dest.clone(),
                 message_type: "GossipSent".to_string(),
                 data: serde_json::json!({
-                    "delta_size": itmes_delta.len(),
-                    "item_ids": itmes_delta.iter().map(|e| e.item.id.clone()).collect::<Vec<_>>(),
+                    "delta_size": items_delta.len(),
+                    "item_ids": items_delta.iter().map(|e| e.item.id.clone()).collect::<Vec<_>>(),
                     "sync_request": sync_flag,
                     "sync_response": is_sync_response,
                 }),
