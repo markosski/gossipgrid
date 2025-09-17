@@ -350,12 +350,14 @@ async fn handle_main_message(
             // We must ensure ack is sent on every received item delta, not only new added items
             if message.items_delta.len() > 0 {
                 let items = message.items_delta.clone();
-                let added = node.add_items(&items, &src.to_string(), env.get_store().write().await).await;
 
-                if items.iter().count() > 0 {
+                let store_guard = env.get_store().write().await;
+                let added = node.add_items(&items, &src.to_string(), store_guard).await;
+
+                if items.len() > 0 {
                     info!(
                         "node={}; Added new {} items from {}, sending {} Acks",
-                        node.get_address(), added.iter().count(), &src, items.iter().count()
+                        node.get_address(), added.iter().count(), &src, items.len()
                     );
                     send_gossip_ack(&node.get_address(), &items, &src.to_string(), &node.get_address(), socket.clone(), env.clone()).await;
                 } else {
@@ -372,11 +374,14 @@ async fn handle_main_message(
                 let mut items: Vec<ItemEntry> = vec![];
                 let last_seen = &node.all_peers.get(&src.to_string()).unwrap().last_seen;
                 let last_seen_hlc = HLC::new().tick_hlc(last_seen.clone());
-                for entry in node.items_since(&last_seen_hlc, &env.get_store().read().await).await {
-                    if let Some(e) = node.get_item(&entry.item.id, &env.get_store().read().await).await {
+
+                let store_guard = env.get_store().read().await;
+                for entry in node.items_since(&last_seen_hlc, &store_guard).await {
+                    if let Some(e) = node.get_item(&entry.item.id, &store_guard).await {
                         items.push(e.clone());
                     }
                 }
+
                 info!(
                     "node={}; Sync identifier {} items to send since {}",
                     node.get_address(),
