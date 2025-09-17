@@ -1,14 +1,14 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod cli;
+pub mod env;
+pub mod event;
 mod gossip;
-mod web;
 pub mod item;
 pub mod node;
 pub mod partition;
 pub mod store;
-pub mod cli;
-pub mod event;
-pub mod env;
+mod web;
 
 pub fn now_millis() -> u64 {
     SystemTime::now()

@@ -1,5 +1,5 @@
-use crate::now_millis;
 use crate::gossip::HLC;
+use crate::now_millis;
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,4 +1,4 @@
-use gossipgrid::item::{ItemSubmitResponse};
+use gossipgrid::item::ItemSubmitResponse;
 
 mod helpers;
 
@@ -9,7 +9,8 @@ async fn test_publish_and_retrieve_item() {
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
-    let _ = client.post("http://localhost:3001/items")
+    let _ = client
+        .post("http://localhost:3001/items")
         .body(r#"{"id": "123", "message": "foo1"}"#)
         .send()
         .await
@@ -17,12 +18,14 @@ async fn test_publish_and_retrieve_item() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    let res = client.get("http://localhost:3002/items/123")
+    let res = client
+        .get("http://localhost:3002/items/123")
         .send()
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse = serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let response: ItemSubmitResponse =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
     let id = response.success.unwrap().get("item").unwrap().to_string();
 
     assert!(id.contains("123"));
@@ -37,7 +40,8 @@ async fn test_publish_and_delete_item() {
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
-    let _ = client.post("http://localhost:3001/items")
+    let _ = client
+        .post("http://localhost:3001/items")
         .body(r#"{"id": "123", "message": "foo1"}"#)
         .send()
         .await
@@ -45,31 +49,36 @@ async fn test_publish_and_delete_item() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let res = client.get("http://localhost:3002/items/123")
+    let res = client
+        .get("http://localhost:3002/items/123")
         .send()
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse = serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let response: ItemSubmitResponse =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
     let id = response.success.unwrap().get("item").unwrap().to_string();
 
     assert!(id.contains("123"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let _ = client.delete("http://localhost:3002/items/123")
+    let _ = client
+        .delete("http://localhost:3002/items/123")
         .send()
         .await
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let res = client.get("http://localhost:3001/items/123")
+    let res = client
+        .get("http://localhost:3001/items/123")
         .send()
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse = serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let response: ItemSubmitResponse =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
     assert!(response.error.unwrap().contains("Item not found"));
 
@@ -83,7 +92,8 @@ async fn test_publish_and_update_item() {
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
-    let _ = client.post("http://localhost:3001/items")
+    let _ = client
+        .post("http://localhost:3001/items")
         .body(r#"{"id": "123", "message": "foo1"}"#)
         .send()
         .await
@@ -91,19 +101,22 @@ async fn test_publish_and_update_item() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let res = client.get("http://localhost:3002/items/123")
+    let res = client
+        .get("http://localhost:3002/items/123")
         .send()
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse = serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let response: ItemSubmitResponse =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
     let id = response.success.unwrap().get("item").unwrap().to_string();
 
     assert!(id.contains("123"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let _ = client.post("http://localhost:3002/items")
+    let _ = client
+        .post("http://localhost:3002/items")
         .body(r#"{"id": "123", "message": "foo2"}"#)
         .send()
         .await
@@ -111,12 +124,14 @@ async fn test_publish_and_update_item() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let res = client.get("http://localhost:3003/items/123")
+    let res = client
+        .get("http://localhost:3003/items/123")
         .send()
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse = serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let response: ItemSubmitResponse =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
     let id = response.success.unwrap().get("item").unwrap().to_string();
 
     assert!(id.contains("foo2"));

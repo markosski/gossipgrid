@@ -1,5 +1,4 @@
-
-use clap::{Parser, Command};
+use clap::{Command, Parser};
 
 const WEB_PORT_DEFAULT: &str = "3001";
 const NODE_PORT_DEFAULT: &str = "4109";

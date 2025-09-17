@@ -1,8 +1,8 @@
-use gossipgrid::{env::Env, event::EventPublisherFileLogger};
 pub use gossipgrid::node::{ClusterConfig, NodeState};
 use gossipgrid::{env, node};
+use gossipgrid::{env::Env, event::EventPublisherFileLogger};
 use std::sync::Arc;
-use tokio::sync::{RwLock};
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
@@ -14,25 +14,26 @@ async fn main() {
     env_logger::init();
 
     let cli_matched = gossipgrid::cli::node_cli().get_matches();
-    let env : Arc<Env> = Arc::new(
-            env::Env::new(
-                Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
-                Box::new(EventPublisherFileLogger::new("events_tests.log".to_string()).await),
-            )
-    );
+    let env: Arc<Env> = Arc::new(env::Env::new(
+        Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
+        Box::new(EventPublisherFileLogger::new("events_tests.log".to_string()).await),
+    ));
 
     match cli_matched.subcommand() {
         Some(("cluster", sub_matches)) => {
             let size: u8 = sub_matches
-                .get_one::<String>("size").unwrap()
+                .get_one::<String>("size")
+                .unwrap()
                 .parse()
                 .expect("Invalid size");
             let web_port: u16 = sub_matches
-                .get_one::<String>("web-port").unwrap()
+                .get_one::<String>("web-port")
+                .unwrap()
                 .parse()
                 .expect("Invalid web port");
             let node_port: u16 = sub_matches
-                .get_one::<String>("node-port").unwrap()
+                .get_one::<String>("node-port")
+                .unwrap()
                 .parse()
                 .expect("Invalid node port");
             let partition_size: u16 = sub_matches
@@ -51,17 +52,9 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            let local_addr = format!(
-                "{}:{}",
-                &LOCAL_IP_DEFAULT,
-                &node_port.to_string()
-            );
+            let local_addr = format!("{}:{}", &LOCAL_IP_DEFAULT, &node_port.to_string());
 
-            let web_addr = format!(
-                "{}:{}",
-                &LOCAL_IP_DEFAULT,
-                &web_port.to_string()
-            );
+            let web_addr = format!("{}:{}", &LOCAL_IP_DEFAULT, &web_port.to_string());
 
             let cluster_config = ClusterConfig {
                 cluster_size: size,
@@ -78,27 +71,23 @@ async fn main() {
             node::start_node(web_addr, local_addr, node_memory, env).await
         }
         Some(("join", sub_matches)) => {
-            let peer_address = sub_matches.get_one::<String>("address").expect("Address is required");
+            let peer_address = sub_matches
+                .get_one::<String>("address")
+                .expect("Address is required");
             let web_port: u16 = sub_matches
-                .get_one::<String>("web-port").unwrap()
+                .get_one::<String>("web-port")
+                .unwrap()
                 .parse()
                 .expect("Invalid web port");
             let node_port: u16 = sub_matches
-                .get_one::<String>("node-port").unwrap()
+                .get_one::<String>("node-port")
+                .unwrap()
                 .parse()
                 .expect("Invalid node port");
 
-            let local_addr = format!(
-                "{}:{}",
-                &LOCAL_IP_DEFAULT,
-                &node_port.to_string()
-            );
+            let local_addr = format!("{}:{}", &LOCAL_IP_DEFAULT, &node_port.to_string());
 
-            let web_addr = format!(
-                "{}:{}",
-                &LOCAL_IP_DEFAULT,
-                &web_port.to_string()
-            );
+            let web_addr = format!("{}:{}", &LOCAL_IP_DEFAULT, &web_port.to_string());
 
             let node_memory = Arc::new(RwLock::new(NodeState::init(
                 local_addr.clone(),
@@ -110,5 +99,6 @@ async fn main() {
             node::start_node(web_addr, local_addr, node_memory, env).await
         }
         _ => unreachable!(),
-    }.expect("Node failed");
+    }
+    .expect("Node failed");
 }

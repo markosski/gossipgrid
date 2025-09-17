@@ -11,13 +11,13 @@ pub struct Event {
 }
 
 #[async_trait::async_trait]
-pub trait EventPublisher: Send + Sync{
+pub trait EventPublisher: Send + Sync {
     async fn publish(&mut self, msg: &Event);
 }
 
 pub struct EventPublisherFileLogger {
     pub file_path: String,
-    file: File
+    file: File,
 }
 
 impl EventPublisherFileLogger {

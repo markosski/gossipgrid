@@ -9,7 +9,6 @@ use crate::item::{ItemEntry, ItemId};
 
 use super::Store; // or define: type ItemId = String;
 
-
 pub struct InMemoryStore {
     item_partitions: HashMap<VNode, HashMap<ItemId, ItemEntry>>,
     items_delta: HashMap<ItemId, ItemEntry>,
@@ -37,7 +36,10 @@ impl Store for InMemoryStore {
 
     async fn add(&mut self, vnode: &VNode, key: String, value: ItemEntry) {
         let vnode_partition = self.item_partitions.get_mut(vnode);
-        info!("Adding item to vnode: {:?}, key: {}, value: {:?}", vnode, key, value);
+        info!(
+            "Adding item to vnode: {:?}, key: {}, value: {:?}",
+            vnode, key, value
+        );
 
         if let Some(partition) = vnode_partition {
             partition.insert(key.clone(), value.clone());
@@ -60,10 +62,7 @@ impl Store for InMemoryStore {
     }
 
     async fn get_all_delta(&self) -> Vec<ItemEntry> {
-        self.items_delta
-            .values()
-            .cloned()
-            .collect()
+        self.items_delta.values().cloned().collect()
     }
 
     async fn clear_all_delta(&mut self) {

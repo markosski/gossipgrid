@@ -83,7 +83,9 @@ impl PartitionMap {
                 Some(this_node.clone())
             } else {
                 let mut random = rand::rng();
-                replicas.get(random.next_u32() as usize % replicas.len()).cloned()
+                replicas
+                    .get(random.next_u32() as usize % replicas.len())
+                    .cloned()
             }
         })
     }
