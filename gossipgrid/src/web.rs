@@ -44,7 +44,6 @@ pub enum ProxyMethod {
     Delete,
 }
 
-// TODO: handle errors where we attemp to send to another node
 pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
     node: &JoinedNode,
     item_id: &ItemId,
@@ -90,7 +89,11 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
         );
     }
 
-    let router_web_port = nodes.iter().last().unwrap().1.web_port;
+    let router_web_port = nodes
+        .iter()
+        .last()
+        .map(|n| n.1.web_port)
+        .ok_or("No web port found")?;
     let web_host = format!("{}:{}", this_host.ip(), &router_web_port);
     info!(
         "node={}; Routing item to remote node: {}",
@@ -103,12 +106,15 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
         ProxyMethod::Get => client.get(format!("http://{}/{}", web_host, url)),
         ProxyMethod::Post => client
             .post(format!("http://{}/{}", web_host, url))
-            .json(&body.unwrap()),
+            .json(&body.expect("Body is required for POST")),
         ProxyMethod::Put => client.put(format!("http://{}/{}", web_host, url)),
         ProxyMethod::Delete => client.delete(format!("http://{}/{}", web_host, url)),
     };
 
-    let resp = resp_builder.send().await.unwrap();
+    let resp = resp_builder
+        .send()
+        .await
+        .or(Err("Failed to send request".to_string()))?;
 
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     let response_message = serde_json::from_slice::<P>(&bytes).map_err(|e| e.to_string())?;
@@ -495,7 +501,9 @@ pub async fn web_server(
             },
         );
 
-    let address = local_web_addr.parse::<SocketAddr>().unwrap();
+    let address = local_web_addr
+        .parse::<SocketAddr>()
+        .expect("Failed to parse address for web server");
     warp::serve(
         post_item
             .or(get_item)

@@ -37,7 +37,11 @@ pub async fn start_node(
     );
 
     // Initialize socket
-    let socket = Arc::new(UdpSocket::bind(&local_addr).await.unwrap());
+    let socket = Arc::new(
+        UdpSocket::bind(&local_addr)
+            .await
+            .expect("Failed to bind UDP socket when starting node"),
+    );
 
     // Fire and forget gossip tasks
     let sending = tokio::spawn(send_gossip_on_interval(

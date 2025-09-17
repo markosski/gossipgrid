@@ -188,8 +188,25 @@ pub async fn send_gossip_ack(
     let ack = GossipAck {
         items_received: items.to_vec(),
     };
-    let encoded_ack = bincode::encode_to_vec(&ack, bincode::config::standard()).unwrap();
-    socket.send_to(&encoded_ack, &peer_addr).await.unwrap();
+
+    if let Ok(encoded_ack) = bincode::encode_to_vec(&ack, bincode::config::standard()) {
+        match socket.send_to(&encoded_ack, &peer_addr).await {
+            Ok(_) => {}
+            Err(e) => {
+                error!(
+                    "node={}; Failed to send GossipAck to {}: {}",
+                    node_name, peer_addr, e
+                );
+                return;
+            }
+        }
+    } else {
+        error!(
+            "node={}; Failed to encode GossipAck; message not sent",
+            node_name
+        );
+        return;
+    }
 
     env.get_event_publisher()
         .write()
@@ -378,8 +395,15 @@ async fn handle_main_message(
                 Ordering::Less => {
                     if message.node_hlc.timestamp == 0 {
                         node.node_hlc.tick_hlc(now_millis());
-                        node.add_node(message.all_peers.get(&src.to_string()).unwrap().clone());
-                        info!("node={}; Adding new node", &node.address);
+                        if let Some(src_node) = message.all_peers.get(&src.to_string()) {
+                            node.add_node(src_node.clone());
+                            info!("node={}; Adding new node", &node.address);
+                        } else {
+                            error!(
+                                "node={}; Cannot find source node in peers list",
+                                &node.get_address()
+                            );
+                        }
                     }
                     info!(
                         "node={}; Received HLC is older to local HLC",
@@ -438,22 +462,29 @@ async fn handle_main_message(
             if message.sync_request.is_sync_request && node.cluster_size() > 1 {
                 info!("node={}; Syncing back to {}", node.get_address(), &src);
                 let mut items: Vec<ItemEntry> = vec![];
-                let last_seen = &node.all_peers.get(&src.to_string()).unwrap().last_seen;
-                let last_seen_hlc = HLC::new().tick_hlc(last_seen.clone());
 
-                let store_guard = env.get_store().read().await;
-                for entry in node.items_since(&last_seen_hlc, &store_guard).await {
-                    if let Some(e) = node.get_item(&entry.item.id, &store_guard).await {
-                        items.push(e.clone());
+                if let Some(src_node) = node.all_peers.get(&src.to_string()) {
+                    let last_seen_hlc = HLC::new().tick_hlc(src_node.last_seen.clone());
+                    let store_guard = env.get_store().read().await;
+                    for entry in node.items_since(&last_seen_hlc, &store_guard).await {
+                        if let Some(e) = node.get_item(&entry.item.id, &store_guard).await {
+                            items.push(e.clone());
+                        }
                     }
+                    info!(
+                        "node={}; Sync identifier {} items to send since {}",
+                        node.get_address(),
+                        &items.len(),
+                        src_node.last_seen
+                    );
+                } else {
+                    error!(
+                        "node={}; Cannot find source node in peers list",
+                        &node.get_address()
+                    );
+                    return;
                 }
 
-                info!(
-                    "node={}; Sync identifier {} items to send since {}",
-                    node.get_address(),
-                    &items.len(),
-                    last_seen
-                );
                 send_gossip_single(
                     Some(&src.to_string()),
                     socket.clone(),
@@ -682,14 +713,27 @@ async fn send_join_message(
         },
         sync_response: is_sync_response,
     };
-    let encoded = bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
 
-    socket.send_to(&encoded, &join_node).await.unwrap();
-    info!(
-        "node={}; sent PreJoin message to {}",
-        node_state.get_address(),
-        &join_node
-    );
+    if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
+        match socket.send_to(&encoded, &join_node).await {
+            Ok(_) => {}
+            Err(e) => {
+                error!(
+                    "node={}; Failed to send JoinMessage to {}: {}",
+                    node_state.get_address(),
+                    join_node,
+                    e
+                );
+                return;
+            }
+        }
+    } else {
+        error!(
+            "node={}; Failed to encode JoinMessage; message not sent",
+            node_state.get_address()
+        );
+        return;
+    }
 
     env.get_event_publisher()
         .write()
@@ -749,9 +793,27 @@ async fn send_gossip_to_peers(
             },
             sync_response: is_sync_response,
         };
-        let encoded = bincode::encode_to_vec(&msg, bincode::config::standard()).unwrap();
 
-        socket.send_to(&encoded, &peer_dest).await.unwrap();
+        if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
+            match socket.send_to(&encoded, &peer_dest).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!(
+                        "node={}; Failed to send GossipMessage to {}: {}",
+                        node_state.get_address(),
+                        peer_dest,
+                        e
+                    );
+                    return;
+                }
+            }
+        } else {
+            error!(
+                "node={}; Failed to encode GossipMessage; message not sent",
+                node_state.get_address()
+            );
+            return;
+        }
 
         if !sync_flag {
             node_state.add_delta_state(
