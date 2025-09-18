@@ -30,7 +30,7 @@ async fn test_publish_and_retrieve_item() {
 
     assert!(id.contains("123"));
 
-    helpers::stop_nodes(nodes).await;
+    helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }
 
 #[tokio::test]
@@ -82,7 +82,7 @@ async fn test_publish_and_delete_item() {
 
     assert!(response.error.unwrap().contains("Item not found"));
 
-    helpers::stop_nodes(nodes).await;
+    helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }
 
 #[tokio::test]
@@ -136,5 +136,17 @@ async fn test_publish_and_update_item() {
 
     assert!(id.contains("foo2"));
 
-    helpers::stop_nodes(nodes).await;
+    // verify node received ack and updated its delta state
+    // none of the nodes should have the item
+
+    // let node_memory = &nodes[2].1;
+    // let guard = node_memory.read().await;
+    // if let gossipgrid::node::NodeState::Joined(state) = &*guard {
+    //     let item = state.get_delta_state().get("123").unwrap();
+    //     assert_eq!(item.message, "foo2");
+    // } else {
+    //     panic!("Node is not in Joined state");
+    // }
+
+    helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }
