@@ -1,4 +1,4 @@
-use gossipgrid::item::ItemSubmitResponse;
+use gossipgrid::{item::ItemSubmitResponse, node::{JoinedNode, NodeState}};
 
 mod helpers;
 
@@ -29,6 +29,16 @@ async fn test_publish_and_retrieve_item() {
     let id = response.success.unwrap().get("item").unwrap().to_string();
 
     assert!(id.contains("123"));
+
+    let node_guard = nodes[2].1.read().await;
+    let node = match &*node_guard {
+        NodeState::Joined(state) => state,
+        _ => panic!("Node is not in Joined state"),
+    };
+
+    let count = node.items_count();
+    assert_eq!(count, 1);
+    drop(node_guard);
 
     helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }

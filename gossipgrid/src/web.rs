@@ -281,7 +281,7 @@ async fn handle_get_tasks_count(
 
     match &*memory {
         node::NodeState::Joined(node) => {
-            let tasks_count = node.items_count(&env.get_store().read().await).await;
+            let tasks_count = node.items_count();
             let response = ItemSubmitResponse {
                 success: Some(
                     vec![("count".to_string(), tasks_count.to_string())]

@@ -1,7 +1,7 @@
 use crate::env::Env;
 use crate::gossip::{HLC, receive_gossip, send_gossip_on_interval};
 use crate::item::{ItemEntry, ItemId, ItemStatus};
-use crate::partition::PartitionMap;
+use crate::partition::{self, PartitionMap, VNode};
 use crate::store::Store;
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
@@ -75,6 +75,7 @@ pub async fn start_node(
 
 pub type NodeId = String;
 pub type Peers = HashMap<NodeId, Node>;
+pub type PartitionCount = HashMap<NodeId, HashMap<VNode, usize>>;
 
 #[derive(Debug)]
 pub enum NodeState {
@@ -105,6 +106,7 @@ pub struct JoinedNode {
     pub all_peers: Peers,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
+    pub partition_counts: HashMap<NodeId, HashMap<VNode, usize>>,
     pub node_hlc: HLC,
     // Stores the items that need to be gossiped to other nodes
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
@@ -195,13 +197,13 @@ impl NodeState {
                     &cluster_config.partition_count,
                     &cluster_config.replication_factor,
                 ),
+                partition_counts: HashMap::new(),
                 address: local_addr,
                 web_port: local_web_port,
                 node_hlc: HLC {
                     timestamp: 0, // Initialize HLC with zero timestamp otherwise new node will be seen as source of truth for cluster state
                     counter: 0,
                 },
-                // store: Box::new(InMemoryStore::new()),
                 index: BTreeMap::new(),
                 items_delta_state: HashMap::new(),
                 items_delta_cache: TtlCache::new(10000),
@@ -263,6 +265,7 @@ impl PreJoinNode {
             all_peers: HashMap::new(),
             cluster_config,
             partition_map,
+            partition_counts: HashMap::new(),
             node_hlc: self.node_hlc.clone(),
             // store: Box::new(InMemoryStore::new()),
             index: BTreeMap::new(),
@@ -618,11 +621,24 @@ impl JoinedNode {
         store: &RwLockReadGuard<'_, Box<dyn Store>>,
     ) -> Option<ItemEntry> {
         let vnode = self.partition_map.hash_key(item_id);
-        store.get(&vnode, item_id).await
+        store.get(&vnode, item_id).await.cloned()
     }
 
-    pub async fn items_count(&self, store: &RwLockReadGuard<'_, Box<dyn Store>>) -> usize {
-        store.count().await
+    // TODO: implement returning total count
+    pub fn items_count(&self) -> usize {
+        self.partition_counts
+            .values()
+            .map(|counts| counts.values().sum::<usize>())
+            .sum()
+    }
+
+    pub fn update_partition_counts(
+        &mut self,
+        node_id: &str,
+        partition_counts: HashMap<VNode, usize>,
+    ) {
+        self.partition_counts
+            .insert(node_id.to_string(), partition_counts);
     }
 
     pub async fn items_since(

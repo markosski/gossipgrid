@@ -25,10 +25,10 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, vnode: &VNode, key: &str) -> Option<ItemEntry> {
+    async fn get(&self, vnode: &VNode, key: &str) -> Option<&ItemEntry> {
         let vnode_partition = self.item_partitions.get(vnode);
         if let Some(partition) = vnode_partition {
-            partition.get(key).cloned()
+            partition.get(key)
         } else {
             None
         }
@@ -73,12 +73,12 @@ impl Store for InMemoryStore {
         self.items_delta.remove(key);
     }
 
-    async fn count(&self) -> usize {
-        let mut count = 0;
-        for partition in self.item_partitions.values() {
-            count += partition.len();
+    async fn partition_counts(&self) -> HashMap<VNode, usize> {
+        let mut counts = HashMap::new();
+        for (vnode, items) in &self.item_partitions {
+            counts.insert(*vnode, items.len());
         }
-        count
+        counts
     }
 
     async fn delta_count(&self) -> usize {

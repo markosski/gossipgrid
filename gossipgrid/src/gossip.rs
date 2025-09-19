@@ -1,8 +1,8 @@
 use crate::env::Env;
 use crate::item::ItemEntry;
 use crate::node::{self, ClusterConfig, DeltaAckState, JoinedNode, Node, NodeState, PreJoinNode};
-use crate::partition::PartitionMap;
-use crate::{now_millis, now_seconds};
+use crate::partition::{PartitionMap, VNode};
+use crate::{now_millis};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ pub struct GossipJoinMessage {
 pub struct GossipMessage {
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
+    pub partition_counts: HashMap<VNode, usize>,
     pub all_peers: HashMap<String, Node>,
     pub node_hlc: HLC,
     pub items_delta: Vec<ItemEntry>,
@@ -321,6 +322,7 @@ async fn handle_main_message(
     state: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
 ) {
+    let node_id = src.to_string();
     let mut node_state = state.write().await;
     info!(
         "node={}; Message Received {:?} from {:?}:{:?}",
@@ -331,7 +333,7 @@ async fn handle_main_message(
     );
 
     env.get_event_publisher().write().await.publish(&crate::event::Event {
-        address_from: src.to_string(),
+        address_from: node_id.clone(),
         address_to: node_state.get_address().clone(),
         message_type: "GossipReceived".to_string(),
         data: serde_json::json!({
@@ -350,7 +352,7 @@ async fn handle_main_message(
 
             let mut joined_node = node.to_joined_state(
                 message.cluster_config.clone(),
-                message.partition_map.clone(),
+                message.partition_map.clone()
             );
             let address = joined_node.address.clone();
             let cluster_size = joined_node.cluster_config.cluster_size.clone();
@@ -358,6 +360,7 @@ async fn handle_main_message(
 
             joined_node.take_peers(&message.all_peers, false);
 
+            // update node_state to joined state
             *node_state = NodeState::Joined(joined_node);
             drop(node_state);
 
@@ -380,9 +383,14 @@ async fn handle_main_message(
             // Update peers to most recent timestamp and vector clock
             match message.node_hlc.compare(&node.node_hlc) {
                 Ordering::Greater | Ordering::Equal => {
+                    // TODO: ensure this is still valid, i.e. why would partition map change?
                     let membership_changed = node.all_peers != message.all_peers;
                     let partition_map_changed = node.partition_map != message.partition_map;
 
+                    // Update partition counts
+                    node.update_partition_counts(&node_id, message.partition_counts);
+
+                    // Merge membership information
                     node.node_hlc = HLC::merge(&node.node_hlc, &message.node_hlc, now_millis());
                     if membership_changed || partition_map_changed {
                         node.take_peers(&message.all_peers, false);
@@ -636,7 +644,7 @@ pub async fn send_gossip_on_interval(
                 info!(
                     "node={}; Item count: {}",
                     &node_address,
-                    &this_node.items_count(&env.get_store().read().await).await
+                    &this_node.items_count()
                 );
                 info!(
                     "node={}; Delta Cache size: {}",
@@ -781,9 +789,11 @@ async fn send_gossip_to_peers(
             &items_delta.len()
         );
 
+        let store_guard = env.get_store().read().await;
         let msg = GossipMessage {
             cluster_config: node_state.cluster_config.clone(),
             partition_map: node_state.partition_map.clone(),
+            partition_counts: store_guard.partition_counts().await,
             all_peers: node_state.all_peers.clone(),
             node_hlc: node_hlc.clone(),
             items_delta: items_delta.clone(),
@@ -793,6 +803,7 @@ async fn send_gossip_to_peers(
             },
             sync_response: is_sync_response,
         };
+        drop(store_guard);
 
         if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
             match socket.send_to(&encoded, &peer_dest).await {
