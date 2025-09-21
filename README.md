@@ -47,6 +47,12 @@ curl -XDELETE http://127.0.0.1:3001/items/<ITEM_ID>
 cargo test --lib
 ```
 
+### Run specific test
+
+```bash
+cargo test --package gossipgrid --test int_test test_publish_and_retrieve_item -- --exact --nocapture
+```
+
 ## CLI
 
 ```

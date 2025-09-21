@@ -85,3 +85,72 @@ impl Store for InMemoryStore {
         return self.items_delta.values().len();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        gossip::HLC,
+        item::{Item, ItemStatus},
+    };
+
+    #[tokio::test]
+    async fn test_partition_counts() {
+        use super::*;
+        let mut store = InMemoryStore::new();
+
+        let vnode1 = 1;
+        let vnode2 = 2;
+
+        store
+            .add(
+                &vnode1,
+                "item1".to_string(),
+                ItemEntry {
+                    item: Item {
+                        id: "item1".to_string(),
+                        message: "test1".to_string(),
+                        submitted_at: 0,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        store
+            .add(
+                &vnode1,
+                "item2".to_string(),
+                ItemEntry {
+                    item: Item {
+                        id: "item2".to_string(),
+                        message: "test2".to_string(),
+                        submitted_at: 0,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        store
+            .add(
+                &vnode2,
+                "item3".to_string(),
+                ItemEntry {
+                    item: Item {
+                        id: "item3".to_string(),
+                        message: "test3".to_string(),
+                        submitted_at: 0,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let counts = store.partition_counts().await;
+        assert_eq!(counts.get(&vnode1), Some(&2));
+        assert_eq!(counts.get(&vnode2), Some(&1));
+    }
+}

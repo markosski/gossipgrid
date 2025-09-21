@@ -1,10 +1,15 @@
-use gossipgrid::{item::ItemSubmitResponse, node::{JoinedNode, NodeState}};
+use gossipgrid::{
+    item::ItemSubmitResponse,
+    node::{JoinedNode, NodeState},
+};
 
 mod helpers;
 
 #[tokio::test]
 async fn test_publish_and_retrieve_item() {
-    env_logger::init();
+    let logs = env_logger::builder().is_test(true).init();
+
+    log::info!("Starting test_publish_and_retrieve_item");
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
@@ -29,6 +34,8 @@ async fn test_publish_and_retrieve_item() {
     let id = response.success.unwrap().get("item").unwrap().to_string();
 
     assert!(id.contains("123"));
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let node_guard = nodes[2].1.read().await;
     let node = match &*node_guard {

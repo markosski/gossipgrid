@@ -11,6 +11,7 @@ use ttl_cache::TtlCache;
 
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -254,18 +255,23 @@ impl PreJoinNode {
         &self.peer_node
     }
 
-    pub fn to_joined_state(
+    pub async fn to_joined_state(
         &mut self,
         cluster_config: ClusterConfig,
         partition_map: PartitionMap,
+        store: RwLockReadGuard<'_, Box<dyn Store>>,
     ) -> JoinedNode {
+        let counts = store.partition_counts().await;
+        let mut partition_counts = HashMap::new();
+        partition_counts.insert(self.address.clone(), counts);
+
         JoinedNode {
             address: self.address.clone(),
             web_port: self.web_port,
             all_peers: HashMap::new(),
             cluster_config,
             partition_map,
-            partition_counts: HashMap::new(),
+            partition_counts: partition_counts,
             node_hlc: self.node_hlc.clone(),
             // store: Box::new(InMemoryStore::new()),
             index: BTreeMap::new(),
@@ -445,6 +451,8 @@ impl JoinedNode {
                 added_items.push(new_entry.clone());
             }
         }
+        let this_node = self.get_address().clone();
+        self.update_partition_counts(&this_node, store_ref.partition_counts().await);
         added_items
     }
 
@@ -560,6 +568,7 @@ impl JoinedNode {
         from_node: &str,
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
     ) -> bool {
+        let this_node = self.get_address().clone();
         let vnode = self.partition_map.hash_key(item_id);
 
         if let Some(existing_entry) = store.get(&vnode, item_id).await {
@@ -581,6 +590,8 @@ impl JoinedNode {
                 },
                 Duration::from_secs(60),
             );
+
+            self.update_partition_counts(&this_node, store.partition_counts().await);
             self.invalidate_delta_state(item_id);
             return true;
         } else {
@@ -624,12 +635,17 @@ impl JoinedNode {
         store.get(&vnode, item_id).await.cloned()
     }
 
-    // TODO: implement returning total count
     pub fn items_count(&self) -> usize {
-        self.partition_counts
-            .values()
-            .map(|counts| counts.values().sum::<usize>())
-            .sum()
+        let mut unique_partitions = HashMap::<VNode, usize>::new();
+        for node_partitions in self.partition_counts.iter() {
+            for node_partition in node_partitions.1.iter() {
+                unique_partitions
+                    .entry(*node_partition.0)
+                    .or_insert(*node_partition.1);
+            }
+        }
+
+        unique_partitions.values().sum()
     }
 
     pub fn update_partition_counts(

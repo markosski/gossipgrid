@@ -20,10 +20,10 @@ RECENTLY DONE
 * ensure all web endpoints have proxy
 * when item is deleted it does not properly propagate
     * item count should exclude deleted items
-
-TODO
 * implement proper count
     * each node should gossip partitions and count, partitions should handle deleted items
+
+TODO
 * take a second look at the delta sync for proper implementation, currently sync flag is false 
 * ensure when retrieving an item for VNODE we also check active Nodes 
 * node that is in sync mode should not be used for reads until changes state

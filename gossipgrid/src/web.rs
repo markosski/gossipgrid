@@ -52,7 +52,7 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
     body: Option<&T>,
 ) -> Result<Option<P>, String> {
     info!(
-        "node={}; Proxying request: {}, {:?}, {:?}",
+        "node={}; Try proxying request: {}, {:?}, {:?}",
         node.get_address(),
         url,
         &method,

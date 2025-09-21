@@ -17,7 +17,10 @@ pub async fn stop_nodes(handles: Vec<tokio::task::JoinHandle<Result<(), anyhow::
 pub async fn start_test_cluster(
     partition_count: u16,
     replication_factor: u8,
-) -> Vec<(tokio::task::JoinHandle<Result<(), anyhow::Error>>, Arc<RwLock<NodeState>>)> {
+) -> Vec<(
+    tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+    Arc<RwLock<NodeState>>,
+)> {
     let local_addr = "127.0.0.1:4009".to_string();
     let local_addr_2 = "127.0.0.1:4010".to_string();
     let local_addr_3 = "127.0.0.1:4011".to_string();
@@ -117,5 +120,9 @@ pub async fn start_test_cluster(
         // increment counter
         counter += 1;
     }
-    vec![(node_1, node_memory_1), (node_2, node_memory_2), (node_3, node_memory_3)]
+    vec![
+        (node_1, node_memory_1),
+        (node_2, node_memory_2),
+        (node_3, node_memory_3),
+    ]
 }

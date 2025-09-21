@@ -1,8 +1,8 @@
 use crate::env::Env;
 use crate::item::ItemEntry;
 use crate::node::{self, ClusterConfig, DeltaAckState, JoinedNode, Node, NodeState, PreJoinNode};
+use crate::now_millis;
 use crate::partition::{PartitionMap, VNode};
-use crate::{now_millis};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ pub struct GossipJoinMessage {
 pub struct GossipMessage {
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
-    pub partition_counts: HashMap<VNode, usize>,
+    pub partition_item_counts: HashMap<VNode, usize>,
     pub all_peers: HashMap<String, Node>,
     pub node_hlc: HLC,
     pub items_delta: Vec<ItemEntry>,
@@ -350,19 +350,25 @@ async fn handle_main_message(
         node::NodeState::PreJoin(node) => {
             node.node_hlc = HLC::merge(&node.node_hlc, &message.node_hlc, now_millis());
 
-            let mut joined_node = node.to_joined_state(
-                message.cluster_config.clone(),
-                message.partition_map.clone()
-            );
+            let mut joined_node = node
+                .to_joined_state(
+                    message.cluster_config.clone(),
+                    message.partition_map.clone(),
+                    env.get_store().read().await,
+                )
+                .await;
             let address = joined_node.address.clone();
             let cluster_size = joined_node.cluster_config.cluster_size.clone();
             let all_peers = message.all_peers.clone();
 
             joined_node.take_peers(&message.all_peers, false);
 
+            // Update partition counts
+            joined_node.update_partition_counts(&node_id, message.partition_item_counts);
+
             // update node_state to joined state
             *node_state = NodeState::Joined(joined_node);
-            drop(node_state);
+            // drop(node_state);
 
             env.get_event_publisher()
                 .write()
@@ -388,7 +394,7 @@ async fn handle_main_message(
                     let partition_map_changed = node.partition_map != message.partition_map;
 
                     // Update partition counts
-                    node.update_partition_counts(&node_id, message.partition_counts);
+                    node.update_partition_counts(&node_id, message.partition_item_counts);
 
                     // Merge membership information
                     node.node_hlc = HLC::merge(&node.node_hlc, &message.node_hlc, now_millis());
@@ -457,6 +463,11 @@ async fn handle_main_message(
                         env.clone(),
                     )
                     .await;
+
+                    // Immediately forward newly received deltas to other peers so they don't
+                    // have to wait for the periodic gossip interval. We rely on the
+                    // items_delta_cache to avoid sending the delta back to the origin.
+                    send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
                 } else {
                     debug!(
                         "node={}; No new items added from {}",
@@ -497,7 +508,7 @@ async fn handle_main_message(
                     Some(&src.to_string()),
                     socket.clone(),
                     node,
-                    true,
+                    false,
                     env.clone(),
                 )
                 .await;
@@ -529,6 +540,7 @@ async fn handle_item_delta_message(
     state: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
 ) {
+    let node_id = src.to_string();
     let mut node_state = state.write().await;
     info!(
         "node={}; Message GossipAck Received {:?} from {:?}:{:?}",
@@ -549,6 +561,9 @@ async fn handle_item_delta_message(
                 }),
                 timestamp: now_millis(),
             }).await;
+
+            // Update partition counts
+            node.update_partition_counts(&node_id, HashMap::new());
 
             node.reconcile_delta_state(
                 &src.to_string(),
@@ -790,10 +805,11 @@ async fn send_gossip_to_peers(
         );
 
         let store_guard = env.get_store().read().await;
+
         let msg = GossipMessage {
             cluster_config: node_state.cluster_config.clone(),
             partition_map: node_state.partition_map.clone(),
-            partition_counts: store_guard.partition_counts().await,
+            partition_item_counts: store_guard.partition_counts().await,
             all_peers: node_state.all_peers.clone(),
             node_hlc: node_hlc.clone(),
             items_delta: items_delta.clone(),
