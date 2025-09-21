@@ -5,10 +5,9 @@ use log::info;
 use crate::partition::VNode;
 
 // Add this import or definition for ItemId
-use crate::item::{ItemEntry, ItemId};
+use crate::item::{self, ItemEntry, ItemId};
 
 use super::Store; // or define: type ItemId = String;
-
 
 pub struct InMemoryStore {
     item_partitions: HashMap<VNode, HashMap<ItemId, ItemEntry>>,
@@ -26,10 +25,10 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, vnode: &VNode, key: &str) -> Option<ItemEntry> {
+    async fn get(&self, vnode: &VNode, key: &str) -> Option<&ItemEntry> {
         let vnode_partition = self.item_partitions.get(vnode);
         if let Some(partition) = vnode_partition {
-            partition.get(key).cloned()
+            partition.get(key)
         } else {
             None
         }
@@ -37,7 +36,10 @@ impl Store for InMemoryStore {
 
     async fn add(&mut self, vnode: &VNode, key: String, value: ItemEntry) {
         let vnode_partition = self.item_partitions.get_mut(vnode);
-        info!("Adding item to vnode: {:?}, key: {}, value: {:?}", vnode, key, value);
+        info!(
+            "Adding item to vnode: {:?}, key: {}, value: {:?}",
+            vnode, key, value
+        );
 
         if let Some(partition) = vnode_partition {
             partition.insert(key.clone(), value.clone());
@@ -60,10 +62,7 @@ impl Store for InMemoryStore {
     }
 
     async fn get_all_delta(&self) -> Vec<ItemEntry> {
-        self.items_delta
-            .values()
-            .cloned()
-            .collect()
+        self.items_delta.values().cloned().collect()
     }
 
     async fn clear_all_delta(&mut self) {
@@ -74,15 +73,93 @@ impl Store for InMemoryStore {
         self.items_delta.remove(key);
     }
 
-    async fn count(&self) -> usize {
-        let mut count = 0;
-        for partition in self.item_partitions.values() {
-            count += partition.len();
+    async fn partition_counts(&self) -> HashMap<VNode, usize> {
+        let mut counts = HashMap::new();
+        for (vnode, items) in &self.item_partitions {
+            let mut counter = 0;
+            for item in items.values() {
+                match item.status {
+                    item::ItemStatus::Tombstone(_) => continue,
+                    item::ItemStatus::Active => {
+                        counter += 1;
+                    }
+                }
+            }
+            counts.insert(*vnode, counter);
         }
-        count
+        counts
     }
 
     async fn delta_count(&self) -> usize {
         return self.items_delta.values().len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        gossip::HLC,
+        item::{Item, ItemStatus},
+    };
+
+    #[tokio::test]
+    async fn test_partition_counts() {
+        use super::*;
+        let mut store = InMemoryStore::new();
+
+        let vnode1 = 1;
+        let vnode2 = 2;
+
+        store
+            .add(
+                &vnode1,
+                "item1".to_string(),
+                ItemEntry {
+                    item: Item {
+                        id: "item1".to_string(),
+                        message: "test1".to_string(),
+                        submitted_at: 0,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        store
+            .add(
+                &vnode1,
+                "item2".to_string(),
+                ItemEntry {
+                    item: Item {
+                        id: "item2".to_string(),
+                        message: "test2".to_string(),
+                        submitted_at: 0,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        store
+            .add(
+                &vnode2,
+                "item3".to_string(),
+                ItemEntry {
+                    item: Item {
+                        id: "item3".to_string(),
+                        message: "test3".to_string(),
+                        submitted_at: 0,
+                    },
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let counts = store.partition_counts().await;
+        assert_eq!(counts.get(&vnode1), Some(&2));
+        assert_eq!(counts.get(&vnode2), Some(&1));
     }
 }

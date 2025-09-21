@@ -18,12 +18,14 @@ RECENTLY DONE
         * verify if other nodes only propagate delta through intervals (and if this is intentional), if so see if they are not sending Ack
     * A: this was due to Acks not being always sent if node already received an update from other node
 * ensure all web endpoints have proxy
-
-TODO
 * when item is deleted it does not properly propagate
     * item count should exclude deleted items
 * implement proper count
     * each node should gossip partitions and count, partitions should handle deleted items
+* add more tests for cluster item count that ensures deleted items are not countedß
+
+TODO
+* change store implementation to return list of items
 * take a second look at the delta sync for proper implementation, currently sync flag is false 
 * ensure when retrieving an item for VNODE we also check active Nodes 
 * node that is in sync mode should not be used for reads until changes state

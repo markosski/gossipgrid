@@ -76,18 +76,23 @@ impl PartitionMap {
         (h.finish() % self.vnode_count as u64) as VNode
     }
 
+    /// Route the key to one of the replicas, preferring this_node if it is one of the replicas
     pub fn route(&self, this_node: &NodeId, key: &str) -> Option<NodeId> {
         let vnode = self.hash_key(key);
         self.vnode_replicas.get(&vnode).and_then(|replicas| {
+            // if this_node is one of the replicas, return it
             if replicas.contains(this_node) {
                 Some(this_node.clone())
             } else {
                 let mut random = rand::rng();
-                replicas.get(random.next_u32() as usize % replicas.len()).cloned()
+                replicas
+                    .get(random.next_u32() as usize % replicas.len())
+                    .cloned()
             }
         })
     }
 
+    /// Check if the given VNode is assigned to the given NodeId
     pub fn contains_vnode(&self, node: &NodeId, vnode: &VNode) -> bool {
         match self.vnode_replicas.get(vnode) {
             Some(replicas) => replicas.contains(node),
