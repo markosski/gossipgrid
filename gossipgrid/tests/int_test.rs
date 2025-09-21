@@ -1,13 +1,13 @@
 use gossipgrid::{
     item::ItemSubmitResponse,
-    node::{JoinedNode, NodeState},
+    node::{NodeState},
 };
 
 mod helpers;
 
 #[tokio::test]
 async fn test_publish_and_retrieve_item() {
-    let logs = env_logger::builder().is_test(true).init();
+    env_logger::init();
 
     log::info!("Starting test_publish_and_retrieve_item");
 
@@ -64,6 +64,7 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
+    // verify item is created
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let res = client
@@ -78,6 +79,7 @@ async fn test_publish_and_delete_item() {
 
     assert!(id.contains("123"));
 
+    // verify item is deleted
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let _ = client
@@ -86,6 +88,7 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
+    
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let res = client
@@ -98,6 +101,17 @@ async fn test_publish_and_delete_item() {
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
     assert!(response.error.unwrap().contains("Item not found"));
+
+    // verify cluster item count
+    let node_guard = nodes[2].1.read().await;
+    let node = match &*node_guard {
+        NodeState::Joined(state) => state,
+        _ => panic!("Node is not in Joined state"),
+    };
+
+    let count = node.items_count();
+    assert_eq!(count, 0);
+    drop(node_guard);
 
     helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }

@@ -5,7 +5,7 @@ use log::info;
 use crate::partition::VNode;
 
 // Add this import or definition for ItemId
-use crate::item::{ItemEntry, ItemId};
+use crate::item::{self, ItemEntry, ItemId};
 
 use super::Store; // or define: type ItemId = String;
 
@@ -76,7 +76,16 @@ impl Store for InMemoryStore {
     async fn partition_counts(&self) -> HashMap<VNode, usize> {
         let mut counts = HashMap::new();
         for (vnode, items) in &self.item_partitions {
-            counts.insert(*vnode, items.len());
+            let mut counter = 0;
+            for item in items.values() {
+                match item.status {
+                    item::ItemStatus::Tombstone(_) => continue,
+                    item::ItemStatus::Active => {
+                        counter += 1;
+                    }
+                }
+            }
+            counts.insert(*vnode, counter);
         }
         counts
     }
