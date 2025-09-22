@@ -2,15 +2,16 @@ use std::collections::HashMap;
 
 use log::info;
 
-use crate::partition::VNode;
+use crate::partition::{PartitionId};
 
 // Add this import or definition for ItemId
 use crate::item::{self, ItemEntry, ItemId};
+use crate::store::DataStoreError;
 
 use super::Store; // or define: type ItemId = String;
 
 pub struct InMemoryStore {
-    item_partitions: HashMap<VNode, HashMap<ItemId, ItemEntry>>,
+    item_partitions: HashMap<PartitionId, HashMap<ItemId, ItemEntry>>,
     items_delta: HashMap<ItemId, ItemEntry>,
 }
 
@@ -25,57 +26,65 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, vnode: &VNode, key: &str) -> Option<&ItemEntry> {
-        let vnode_partition = self.item_partitions.get(vnode);
-        if let Some(partition) = vnode_partition {
-            partition.get(key)
+    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<&ItemEntry>, DataStoreError> {
+        let maybe_partition = self.item_partitions.get(&partition);
+        if let Some(partition) = maybe_partition {
+            Ok(partition.get(key))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    async fn add(&mut self, vnode: &VNode, key: String, value: ItemEntry) {
-        let vnode_partition = self.item_partitions.get_mut(vnode);
+    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<&ItemEntry>, DataStoreError> {
+        Ok(vec![])
+    }
+
+    async fn insert(&mut self, partition: &PartitionId, key: String, value: ItemEntry) -> Result<(), DataStoreError> {
+        let maybe_partition = self.item_partitions.get_mut(&partition);
         info!(
-            "Adding item to vnode: {:?}, key: {}, value: {:?}",
-            vnode, key, value
+            "Adding item to partition: {:?}, key: {}, value: {:?}",
+            partition, key, value
         );
 
-        if let Some(partition) = vnode_partition {
+        if let Some(partition) = maybe_partition {
             partition.insert(key.clone(), value.clone());
             self.items_delta.insert(key, value);
         } else {
             let mut new_partition = HashMap::new();
             new_partition.insert(key.clone(), value.clone());
-            self.item_partitions.insert(*vnode, new_partition);
+            self.item_partitions.insert(*partition, new_partition);
             self.items_delta.insert(key, value);
         }
+        Ok(())
     }
 
-    async fn remove(&mut self, vnode: &VNode, key: &str) {
-        info!("Removing item from vnode: {:?}, key: {}", vnode, key);
+    async fn remove(&mut self, partition: &PartitionId, key: &str) -> Result<(), DataStoreError> {
+        info!("Removing item from partition: {:?}, key: {}", partition, key);
 
-        let vnode_partition = self.item_partitions.get_mut(vnode);
-        if let Some(partition) = vnode_partition {
+        let maybe_partition = self.item_partitions.get_mut(&partition);
+        if let Some(partition) = maybe_partition {
             partition.remove(key);
         }
+        Ok(())
     }
 
-    async fn get_all_delta(&self) -> Vec<ItemEntry> {
-        self.items_delta.values().cloned().collect()
+    async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError> {
+        Ok(self.items_delta.values().cloned().collect())
     }
 
-    async fn clear_all_delta(&mut self) {
+    async fn clear_all_delta(&mut self) -> Result<(), DataStoreError> {
         self.items_delta.clear();
+        Ok(())
     }
 
-    async fn remove_delta_item(&mut self, key: &str) {
+    async fn remove_from_delta(&mut self, key: &str) -> Result<(), DataStoreError> {
         self.items_delta.remove(key);
+        Ok(())
     }
 
-    async fn partition_counts(&self) -> HashMap<VNode, usize> {
+    async fn partition_counts(&self) -> Result<HashMap<PartitionId, usize>, DataStoreError> {
         let mut counts = HashMap::new();
-        for (vnode, items) in &self.item_partitions {
+        for (partition, items) in &self.item_partitions {
             let mut counter = 0;
             for item in items.values() {
                 match item.status {
@@ -85,13 +94,13 @@ impl Store for InMemoryStore {
                     }
                 }
             }
-            counts.insert(*vnode, counter);
+            counts.insert(*partition, counter);
         }
-        counts
+        Ok(counts)
     }
 
-    async fn delta_count(&self) -> usize {
-        return self.items_delta.values().len();
+    async fn delta_count(&self) -> Result<usize, DataStoreError> {
+        Ok(self.items_delta.values().len())
     }
 }
 
@@ -107,12 +116,12 @@ mod tests {
         use super::*;
         let mut store = InMemoryStore::new();
 
-        let vnode1 = 1;
-        let vnode2 = 2;
+        let partition1 = PartitionId(1);
+        let partition2 = PartitionId(2);
 
-        store
-            .add(
-                &vnode1,
+        let _ = store
+            .insert(
+                &partition1,
                 "item1".to_string(),
                 ItemEntry {
                     item: Item {
@@ -126,9 +135,9 @@ mod tests {
             )
             .await;
 
-        store
-            .add(
-                &vnode1,
+        let _ = store
+            .insert(
+                &partition1,
                 "item2".to_string(),
                 ItemEntry {
                     item: Item {
@@ -142,9 +151,9 @@ mod tests {
             )
             .await;
 
-        store
-            .add(
-                &vnode2,
+        let _ = store
+            .insert(
+                &partition2,
                 "item3".to_string(),
                 ItemEntry {
                     item: Item {
@@ -158,8 +167,8 @@ mod tests {
             )
             .await;
 
-        let counts = store.partition_counts().await;
-        assert_eq!(counts.get(&vnode1), Some(&2));
-        assert_eq!(counts.get(&vnode2), Some(&1));
+        let counts = store.partition_counts().await.unwrap();
+        assert_eq!(counts.get(&partition1), Some(&2));
+        assert_eq!(counts.get(&partition2), Some(&1));
     }
 }

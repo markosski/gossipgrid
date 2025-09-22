@@ -165,7 +165,16 @@ async fn handle_post_task(
                     let this_node = node.address.clone();
                     {
                         let store = env.get_store().write().await;
-                        node.add_items(&vec![item_entry], &this_node, store).await;
+                        match node.add_items(&vec![item_entry], &this_node, store).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                let response = ItemSubmitResponse {
+                                    success: None,
+                                    error: Some(format!("Item submission error: {}", e)),
+                                };
+                                return Ok(warp::reply::json(&response));
+                            }
+                        }
                     }
 
                     send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
@@ -229,7 +238,18 @@ async fn handle_get_task(
             } else {
                 let store_ref = env.get_store().read().await;
 
-                if let Some(item) = node.get_item(&item_id, &store_ref).await {
+                let maybe_item = match node.get_item(&item_id, &store_ref).await {
+                    Ok(item) => item,
+                    Err(e) => {
+                        let response = ItemSubmitResponse {
+                            success: None,
+                            error: Some(format!("Item retrieval error: {}", e)),
+                        };
+                        return Ok(warp::reply::json(&response));
+                    }
+                };
+
+                if let Some(item) = maybe_item {
                     match item.status {
                         ItemStatus::Active => {
                             let response = ItemSubmitResponse {
@@ -327,13 +347,25 @@ async fn handle_remove_task(
                 Ok(None) => {
                     let response: ItemSubmitResponse;
                     let this_node_addr = node.get_address().clone();
-                    let is_success = node
+
+                    let is_success = match node
                         .remove_item(
                             &item_id.to_string(),
                             &this_node_addr,
                             &mut env.get_store().write().await,
                         )
-                        .await;
+                        .await {
+                            Ok(_) => true,
+                            Err(e) => {
+                                error!("Error removing item: {}", e);
+                                return Ok(warp::reply::json(
+                                &ItemSubmitResponse {
+                                    success: None,
+                                    error: Some(format!("Item not found: {}", &item_id)),
+                                }));
+                            }
+                        };
+
                     if is_success {
                         response = ItemSubmitResponse {
                             success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
@@ -394,10 +426,18 @@ async fn handle_update_task(
                     info!("Routing to this node");
                     let response: ItemSubmitResponse;
 
-                    if node
-                        .get_item(&item_id, &env.get_store().read().await)
-                        .await
-                        .is_some()
+                    let maybe_item = match node.get_item(&item_id, &env.get_store().read().await).await {
+                        Ok(item) => item,
+                        Err(e) => {
+                            let response = ItemSubmitResponse {
+                                success: None,
+                                error: Some(format!("Item retrieval error: {}", e)),
+                            };
+                            return Ok(warp::reply::json(&response));
+                        }
+                    };
+
+                    if maybe_item.is_some()
                     {
                         let new_item_entry = ItemEntry {
                             item: Item {
@@ -413,12 +453,22 @@ async fn handle_update_task(
                         };
 
                         let node_address = node.get_address().clone();
-                        node.add_items(
+                        match node.add_items(
                             &vec![new_item_entry],
                             &node_address,
                             env.get_store().write().await,
                         )
-                        .await;
+                        .await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                let response = ItemSubmitResponse {
+                                    success: None,
+                                    error: Some(format!("Item update error: {}", e)),
+                                };
+                                return Ok(warp::reply::json(&response));
+                            }
+                        }
+
                         response = ItemSubmitResponse {
                             success: Some(
                                 vec![

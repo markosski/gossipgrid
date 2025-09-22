@@ -1,17 +1,17 @@
 use crate::env::Env;
 use crate::gossip::{HLC, receive_gossip, send_gossip_on_interval};
 use crate::item::{ItemEntry, ItemId, ItemStatus};
-use crate::partition::{self, PartitionMap, VNode};
+use crate::partition::{PartitionMap, PartitionId};
 use crate::store::Store;
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
 use log::{error, info};
+use thiserror::Error;
 use tokio::try_join;
 use ttl_cache::TtlCache;
 
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -19,13 +19,24 @@ use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 const DELTA_STATE_EXPIRY: Duration = Duration::from_secs(60);
 
+#[derive(Error, Debug)]                                                   
+pub enum NodeError {
+    #[error("Error starting node: {0}")]                   
+    ErrorStartingNode(String),
+    #[error("Error joining node: {0}")]                   
+    ErrorJoiningNode(String),
+    #[error("Error performing item operation: {0}")]                   
+    ItemOperationError(String)
+}
+
 /// Main entry point for the node
+//TODO: handle error
 pub async fn start_node(
     web_addr: String,
     local_addr: String,
     node_state: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
-) -> anyhow::Result<()> {
+) -> Result<(), NodeError> {
     let sync_flag = Arc::new(Mutex::new(false));
     let node_address = {
         let node_state = node_state.read().await;
@@ -69,14 +80,16 @@ pub async fn start_node(
     ));
 
     // Panic if one of the tasks fails
-    try_join!(sending, receiving, web_server)?;
+    try_join!(sending, receiving, web_server).map_err(|e| {
+        NodeError::ErrorStartingNode(format!("Node task failed: {}", e))
+    })?;
 
     Ok(())
 }
 
 pub type NodeId = String;
 pub type Peers = HashMap<NodeId, Node>;
-pub type PartitionCount = HashMap<NodeId, HashMap<VNode, usize>>;
+pub type PartitionCount = HashMap<NodeId, HashMap<PartitionId, usize>>;
 
 #[derive(Debug)]
 pub enum NodeState {
@@ -107,7 +120,7 @@ pub struct JoinedNode {
     pub all_peers: Peers,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
-    pub partition_counts: HashMap<NodeId, HashMap<VNode, usize>>,
+    pub partition_counts: HashMap<NodeId, HashMap<PartitionId, usize>>,
     pub node_hlc: HLC,
     // Stores the items that need to be gossiped to other nodes
     pub items_delta_state: HashMap<ItemId, DeltaAckState>,
@@ -260,12 +273,15 @@ impl PreJoinNode {
         cluster_config: ClusterConfig,
         partition_map: PartitionMap,
         store: RwLockReadGuard<'_, Box<dyn Store>>,
-    ) -> JoinedNode {
-        let counts = store.partition_counts().await;
+    ) -> Result<JoinedNode, NodeError> {
+        let counts = store.partition_counts().await.map_err(|e| {
+            NodeError::ErrorJoiningNode(e.to_string())
+        })?;
+
         let mut partition_counts = HashMap::new();
         partition_counts.insert(self.address.clone(), counts);
 
-        JoinedNode {
+        Ok(JoinedNode {
             address: self.address.clone(),
             web_port: self.web_port,
             all_peers: HashMap::new(),
@@ -278,7 +294,7 @@ impl PreJoinNode {
             items_delta_state: HashMap::new(),
             items_delta_cache: TtlCache::new(10000),
             next_node_index: 0,
-        }
+        })
     }
 }
 
@@ -368,9 +384,14 @@ impl JoinedNode {
         entry: ItemEntry,
         from_node: &str,
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
-    ) -> Option<ItemEntry> {
-        let vnode = self.partition_map.hash_key(&entry.item.id);
-        if let Some(existing_entry) = store.get(&vnode, &entry.item.id).await {
+    ) -> Result<Option<ItemEntry>, NodeError> {
+        let partition = self.partition_map.hash_key(&entry.item.id);
+
+        let maybe_existing_entry = store.get(&partition, &entry.item.id).await.map_err(|e| {
+            NodeError::ItemOperationError(e.to_string())
+        })?;
+
+        if let Some(existing_entry) = maybe_existing_entry {
             if entry.hlc > existing_entry.hlc {
                 let new_entry = ItemEntry {
                     item: entry.item.clone(),
@@ -379,8 +400,11 @@ impl JoinedNode {
                 };
 
                 store
-                    .add(&vnode, entry.item.id.clone(), new_entry.clone())
-                    .await;
+                    .insert(&partition, entry.item.id.clone(), new_entry.clone())
+                    .await.map_err(|e| {
+                        NodeError::ItemOperationError(e.to_string())
+                    })?;
+
                 info!(
                     "node={}; Updated item {} with new entry: {:?}",
                     self.get_address(),
@@ -399,7 +423,7 @@ impl JoinedNode {
                 );
                 self.invalidate_delta_state(&entry.item.id);
 
-                Some(new_entry.clone())
+                Ok(Some(new_entry.clone()))
             } else {
                 // If the new entry is older we do nothing
                 info!(
@@ -409,14 +433,18 @@ impl JoinedNode {
                     &entry.hlc,
                     &existing_entry.hlc
                 );
-                None
+                Ok(None)
             }
         } else {
             // Add new item
             let new_entry = entry.clone();
             store
-                .add(&vnode, entry.item.id.clone(), new_entry.clone())
-                .await;
+                .insert(&partition, entry.item.id.clone(), new_entry.clone())
+                .await.map_err(|e| {
+                    NodeError::ItemOperationError(e.to_string())
+                })?;
+
+
             info!(
                 "node={}; Added new item {}: {:?}",
                 self.get_address(),
@@ -434,7 +462,7 @@ impl JoinedNode {
                 Duration::from_secs(60),
             );
 
-            Some(new_entry.clone())
+            Ok(Some(new_entry.clone()))
         }
     }
 
@@ -443,17 +471,31 @@ impl JoinedNode {
         items: &[ItemEntry],
         from_node: &str,
         store: RwLockWriteGuard<'_, Box<dyn Store>>,
-    ) -> Vec<ItemEntry> {
+    ) -> Result<Vec<ItemEntry>, NodeError> {
         let mut added_items = vec![];
         let mut store_ref = store;
+
         for item in items {
-            if let Some(new_entry) = self.add_item(item.clone(), from_node, &mut store_ref).await {
+            let maybe_new_entry = self.add_item(item.clone(), from_node, &mut store_ref).await.map_err(|e| {
+                NodeError::ItemOperationError(e.to_string())
+            })?;
+
+            if let Some(new_entry) = maybe_new_entry {
                 added_items.push(new_entry.clone());
             }
         }
         let this_node = self.get_address().clone();
-        self.update_partition_counts(&this_node, store_ref.partition_counts().await);
-        added_items
+
+
+        let partition_counts = match store_ref.partition_counts().await {
+            Ok(counts) => counts,
+            Err(e) => {
+                error!("node={}; Failed to get partition counts: {}", this_node, e);
+                HashMap::new()
+            }
+        };
+        self.update_partition_counts(&this_node, partition_counts);
+        Ok(added_items)
     }
 
     /// Purge delta state for acknowledged delta items
@@ -466,7 +508,7 @@ impl JoinedNode {
         from_node: &str,
         ack_delta_items: &[ItemEntry],
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
-    ) {
+    ) -> Result<(), NodeError> {
         for ack_item in ack_delta_items {
             if let Some(delta_ack) = self.items_delta_state.get_mut(&ack_item.item.id) {
                 delta_ack.peers_pending.remove(from_node);
@@ -477,11 +519,15 @@ impl JoinedNode {
                         self.get_address(),
                         &ack_item.item.id
                     );
-                    store.remove_delta_item(&ack_item.item.id).await;
+                    store.remove_from_delta(&ack_item.item.id).await.map_err(|e| {
+                        NodeError::ItemOperationError(e.to_string())
+                    })?;
+
                     self.items_delta_state.remove(&ack_item.item.id);
                 }
             }
         }
+        Ok(())
     }
 
     /// Add new items to delta state
@@ -535,8 +581,11 @@ impl JoinedNode {
         });
     }
 
-    pub async fn clear_delta(&mut self, store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) {
-        store.clear_all_delta().await;
+    pub async fn clear_delta(&mut self, store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) -> Result<(), NodeError> {
+        store.clear_all_delta().await.map_err(|e| {
+            NodeError::ItemOperationError(e.to_string())
+        })?;
+        Ok(())
     }
 
     pub fn get_delta_state(&self) -> HashMap<ItemId, DeltaAckState> {
@@ -548,9 +597,14 @@ impl JoinedNode {
         &self,
         node: &NodeId,
         store: &RwLockReadGuard<'_, Box<dyn Store>>,
-    ) -> Vec<ItemEntry> {
+    ) -> Result<Vec<ItemEntry>, NodeError> {
         let mut items = vec![];
-        for item_entry in store.get_all_delta().await.iter() {
+
+        let item_entries = store.get_all_delta().await.map_err(|e| {
+            NodeError::ItemOperationError(e.to_string())
+        })?;
+
+        for item_entry in item_entries.iter() {
             if let Some(cached_item) = self.items_delta_cache.get(item_entry.item.id.as_str()) {
                 if !(cached_item.node_id == *node && cached_item.item_hlc >= item_entry.hlc) {
                     items.push(item_entry.clone());
@@ -559,7 +613,7 @@ impl JoinedNode {
                 items.push(item_entry.clone());
             }
         }
-        items
+        Ok(items)
     }
 
     pub async fn remove_item(
@@ -567,19 +621,25 @@ impl JoinedNode {
         item_id: &str,
         from_node: &str,
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
-    ) -> bool {
+    ) -> Result<bool, NodeError> {
         let this_node = self.get_address().clone();
-        let vnode = self.partition_map.hash_key(item_id);
+        let partition = self.partition_map.hash_key(item_id);
 
-        if let Some(existing_entry) = store.get(&vnode, item_id).await {
+        let maybe_existing_entry = store.get(&partition, item_id).await.map_err(|e| {
+            NodeError::ItemOperationError(e.to_string())
+        })?;
+
+        if let Some(existing_entry) = maybe_existing_entry {
             let mut new_item_entry = existing_entry.clone();
             let now_millis = now_millis();
             new_item_entry.status = ItemStatus::Tombstone(now_millis);
             new_item_entry.hlc.tick_hlc(now_millis);
 
             store
-                .add(&vnode, item_id.to_string(), new_item_entry.clone())
-                .await;
+                .insert(&partition, item_id.to_string(), new_item_entry.clone())
+                .await.map_err(|e| {
+                    NodeError::ItemOperationError(e.to_string())
+                })?;
 
             // Update the delta and cache
             self.items_delta_cache.insert(
@@ -591,11 +651,19 @@ impl JoinedNode {
                 Duration::from_secs(60),
             );
 
-            self.update_partition_counts(&this_node, store.partition_counts().await);
+            let partition_counts = match store.partition_counts().await {
+                Ok(counts) => counts,
+                Err(e) => {
+                    error!("node={}; Failed to get partition counts: {}", this_node, e);
+                    HashMap::new()
+                }
+            };
+
+            self.update_partition_counts(&this_node, partition_counts);
             self.invalidate_delta_state(item_id);
-            return true;
+            return Ok(true);
         } else {
-            return false; // Node not found
+            return Ok(false); // Node not found
         }
     }
 
@@ -630,13 +698,17 @@ impl JoinedNode {
         &self,
         item_id: &str,
         store: &RwLockReadGuard<'_, Box<dyn Store>>,
-    ) -> Option<ItemEntry> {
-        let vnode = self.partition_map.hash_key(item_id);
-        store.get(&vnode, item_id).await.cloned()
+    ) -> Result<Option<ItemEntry>, NodeError> {
+        let partition = self.partition_map.hash_key(item_id);
+        let maybe_item = store.get(&partition, item_id).await.map_err(|e| {
+            NodeError::ItemOperationError(e.to_string())
+        })?;
+
+        Ok(maybe_item.cloned())
     }
 
     pub fn items_count(&self) -> usize {
-        let mut unique_partitions = HashMap::<VNode, usize>::new();
+        let mut unique_partitions = HashMap::<PartitionId, usize>::new();
         for node_partitions in self.partition_counts.iter() {
             for node_partition in node_partitions.1.iter() {
                 unique_partitions
@@ -651,7 +723,7 @@ impl JoinedNode {
     pub fn update_partition_counts(
         &mut self,
         node_id: &str,
-        partition_counts: HashMap<VNode, usize>,
+        partition_counts: HashMap<PartitionId, usize>,
     ) {
         self.partition_counts
             .insert(node_id.to_string(), partition_counts);
@@ -661,18 +733,22 @@ impl JoinedNode {
         &self,
         hlc: &HLC,
         store: &RwLockReadGuard<'_, Box<dyn Store>>,
-    ) -> Vec<ItemEntry> {
+    ) -> Result<Vec<ItemEntry>, NodeError> {
         let mut items = vec![];
         for (_, set) in self.index.range(hlc..).rev() {
             for item_id in set {
-                let vnode = self.partition_map.hash_key(item_id);
+                let partition = self.partition_map.hash_key(item_id);
 
-                if let Some(item) = store.get(&vnode, item_id).await {
+                let maybe_item = store.get(&partition, item_id).await.map_err(|e| {
+                    NodeError::ItemOperationError(e.to_string())
+                })?;
+
+                if let Some(item) = maybe_item {
                     items.push(item.clone());
                 }
             }
         }
-        items
+        Ok(items)
     }
 }
 
