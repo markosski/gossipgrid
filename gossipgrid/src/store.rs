@@ -8,9 +8,9 @@ use crate::{item::ItemEntry, partition::{PartitionId}};
 
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
-    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<&ItemEntry>, DataStoreError>;
+    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<ItemEntry>, DataStoreError>;
 
-    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<&ItemEntry>, DataStoreError>;
+    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError>;
 
     async fn insert(&mut self, partition: &PartitionId, key: String, value: ItemEntry) -> Result<(), DataStoreError>;
 

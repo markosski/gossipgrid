@@ -26,16 +26,16 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<&ItemEntry>, DataStoreError> {
+    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<ItemEntry>, DataStoreError> {
         let maybe_partition = self.item_partitions.get(&partition);
         if let Some(partition) = maybe_partition {
-            Ok(partition.get(key))
+            Ok(partition.get(key).cloned())
         } else {
             Ok(None)
         }
     }
 
-    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<&ItemEntry>, DataStoreError> {
+    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
         Ok(vec![])
     }
 

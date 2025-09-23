@@ -704,7 +704,7 @@ impl JoinedNode {
             NodeError::ItemOperationError(e.to_string())
         })?;
 
-        Ok(maybe_item.cloned())
+        Ok(maybe_item)
     }
 
     pub fn items_count(&self) -> usize {
