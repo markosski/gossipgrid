@@ -8,8 +8,9 @@ pub type ItemId = String;
 
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct Item {
-    pub id: ItemId,
-    pub message: String, // Example metadata
+    pub partitionKey: String,
+    pub rangeKey: String,
+    pub message: Vec<u8>, // Example metadata
     pub submitted_at: u64,
 }
 

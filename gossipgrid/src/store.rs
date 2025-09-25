@@ -8,20 +8,31 @@ use crate::{item::ItemEntry, partition::{PartitionId}};
 
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
-    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<ItemEntry>, DataStoreError>;
+    /// Get item by key and range_key
+    async fn get(&self, partition: &PartitionId, key: &str, range_key: &str) -> Result<Option<ItemEntry>, DataStoreError>;
 
-    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError>;
+    /// Get many items by key and optional range_key
+    /// If range_key is None, get all items with the given key up to the limit
+    async fn get_many(&self, partition: &PartitionId, key: &str, range_key: Option<&str>, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError>;
 
-    async fn insert(&mut self, partition: &PartitionId, key: String, value: ItemEntry) -> Result<(), DataStoreError>;
+    /// Insert item by key and range_key
+    /// If an item with the same key and range_key exists, it should be updated
+    async fn insert(&mut self, partition: &PartitionId, key: String, range_key: &str, value: ItemEntry) -> Result<(), DataStoreError>;
 
-    async fn remove(&mut self, partition: &PartitionId, key: &str) -> Result<(), DataStoreError>;
+    /// Remove item by key and optional range_key
+    /// If range_key is None, remove all items with the given key
+    async fn remove(&mut self, partition: &PartitionId, key: Option<&str>, range_key: &str) -> Result<(), DataStoreError>;
 
+    /// Get all items in the delta
     async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError>;
 
+    /// Clear all items in the delta
     async fn clear_all_delta(&mut self) -> Result<(), DataStoreError>;
 
+    /// Remove item from delta by key
     async fn remove_from_delta(&mut self, key: &str) -> Result<(), DataStoreError>;
 
+    /// Get count of items in the delta
     async fn delta_count(&self) -> Result<usize, DataStoreError>;
 
     /// Get counts of items per partition
