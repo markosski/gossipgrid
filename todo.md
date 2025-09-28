@@ -27,8 +27,11 @@ RECENTLY DONE
 * migrate away from Vnode references to PartitionId
 
 TODO
+* ensure base64 encoding when returning item
+    * add api param to convert bytes to string
 * change store implementation to return list of items
     * considerations for sort key / composite key, what order guarantees should we provide
+    * ensure endpoints function properly, e.g. when store key provided, first ensure single record is found before making and update, when creating a record verify it doesn't exist already
 * take a second look at the delta sync for proper implementation, currently sync flag is false 
 * ensure when retrieving an item for VNODE we also check active Nodes 
 * node that is in sync mode should not be used for reads until changes state

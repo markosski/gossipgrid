@@ -5,14 +5,14 @@ use log::info;
 use crate::partition::{PartitionId};
 
 // Add this import or definition for ItemId
-use crate::item::{self, ItemEntry, ItemId};
-use crate::store::DataStoreError;
+use crate::item::{self, Item, ItemEntry};
+use crate::store::{DataStoreError, StorageKey};
 
 use super::Store; // or define: type ItemId = String;
 
 pub struct InMemoryStore {
-    item_partitions: HashMap<PartitionId, HashMap<ItemId, ItemEntry>>,
-    items_delta: HashMap<ItemId, ItemEntry>,
+    item_partitions: HashMap<PartitionId, HashMap<StorageKey, Item>>,
+    items_delta: HashMap<StorageKey, Item>,
 }
 
 impl InMemoryStore {
@@ -26,40 +26,42 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, partition: &PartitionId, key: &str) -> Result<Option<ItemEntry>, DataStoreError> {
+    async fn get(&self, partition: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
         let maybe_partition = self.item_partitions.get(&partition);
         if let Some(partition) = maybe_partition {
-            Ok(partition.get(key).cloned())
+            Ok(partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone())))
         } else {
             Ok(None)
         }
     }
 
-    async fn get_many(&self, partition: &PartitionId, key: &str, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+    async fn get_many(&self, partition: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+        // TODO: loop through items match on parittion key and partial match on range key
+        // return up to limit items
         Ok(vec![])
     }
 
-    async fn insert(&mut self, partition: &PartitionId, key: String, value: ItemEntry) -> Result<(), DataStoreError> {
+    async fn insert(&mut self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {
         let maybe_partition = self.item_partitions.get_mut(&partition);
         info!(
             "Adding item to partition: {:?}, key: {}, value: {:?}",
-            partition, key, value
+            partition, key.to_string(), value
         );
 
         if let Some(partition) = maybe_partition {
             partition.insert(key.clone(), value.clone());
-            self.items_delta.insert(key, value);
+            self.items_delta.insert(key.clone(), value);
         } else {
             let mut new_partition = HashMap::new();
             new_partition.insert(key.clone(), value.clone());
             self.item_partitions.insert(*partition, new_partition);
-            self.items_delta.insert(key, value);
+            self.items_delta.insert(key.clone(), value);
         }
         Ok(())
     }
 
-    async fn remove(&mut self, partition: &PartitionId, key: &str) -> Result<(), DataStoreError> {
-        info!("Removing item from partition: {:?}, key: {}", partition, key);
+    async fn remove(&mut self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError> {
+        info!("Removing item from partition: {:?}, key: {}", partition, key.to_string());
 
         let maybe_partition = self.item_partitions.get_mut(&partition);
         if let Some(partition) = maybe_partition {
@@ -69,7 +71,7 @@ impl Store for InMemoryStore {
     }
 
     async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError> {
-        Ok(self.items_delta.values().cloned().collect())
+        Ok(self.items_delta.iter().map(|(k, v)| ItemEntry::new(k.clone(), v.clone())).collect())
     }
 
     async fn clear_all_delta(&mut self) -> Result<(), DataStoreError> {
@@ -77,7 +79,7 @@ impl Store for InMemoryStore {
         Ok(())
     }
 
-    async fn remove_from_delta(&mut self, key: &str) -> Result<(), DataStoreError> {
+    async fn remove_from_delta(&mut self, key: &StorageKey) -> Result<(), DataStoreError> {
         self.items_delta.remove(key);
         Ok(())
     }
@@ -107,9 +109,64 @@ impl Store for InMemoryStore {
 #[cfg(test)]
 mod tests {
     use crate::{
-        gossip::HLC,
-        item::{Item, ItemStatus},
+        gossip::HLC, item::{Item, ItemStatus}, partition::PartitionMap, store::{PartitionKey, RangeKey}
     };
+
+    #[tokio::test]
+    async fn test_insert_item_pk_only() {
+        use super::*;
+        let mut store = InMemoryStore::new();
+        let partition_map = PartitionMap::new(&10, &2);
+
+        let storage_key = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
+        let partition = partition_map.hash_key(&storage_key.to_string());
+
+        let _ = store
+            .insert(
+                &partition,
+                &storage_key,
+                Item {
+                    message: "test".as_bytes().to_vec(),
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let retrieved_item = store.get(&partition, &storage_key).await.unwrap();
+        assert!(retrieved_item.is_some());
+        let item_entry = retrieved_item.unwrap();
+        assert_eq!(item_entry.storage_key, storage_key);
+        assert_eq!(item_entry.item.message, "test".as_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_insert_item_pk_and_rk() {
+        use super::*;
+        let mut store = InMemoryStore::new();
+        let partition_map = PartitionMap::new(&10, &2);
+
+        let storage_key = StorageKey { partition_key: PartitionKey("123".to_string()), range_key: Some(RangeKey("456".to_string())) };
+        let partition = partition_map.hash_key(&storage_key.partition_key.value());
+
+        let _ = store
+            .insert(
+                &partition,
+                &storage_key,
+                Item {
+                    message: "test".as_bytes().to_vec(),
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let retrieved_item = store.get(&partition, &storage_key).await.unwrap();
+        assert!(retrieved_item.is_some());
+        let item_entry = retrieved_item.unwrap();
+        assert_eq!(item_entry.storage_key, storage_key);
+        assert_eq!(item_entry.item.message, "test".as_bytes().to_vec());
+    }
 
     #[tokio::test]
     async fn test_partition_counts() {
@@ -119,16 +176,16 @@ mod tests {
         let partition1 = PartitionId(1);
         let partition2 = PartitionId(2);
 
+        let storage_key1 = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
+        let storage_key2 = StorageKey { partition_key: PartitionKey("item2".to_string()), range_key: None };
+        let storage_key3 = StorageKey { partition_key: PartitionKey("item3".to_string()), range_key: None };
+
         let _ = store
             .insert(
                 &partition1,
-                "item1".to_string(),
-                ItemEntry {
-                    item: Item {
-                        id: "item1".to_string(),
-                        message: "test1".to_string(),
-                        submitted_at: 0,
-                    },
+                &storage_key1,
+                Item {
+                    message: "test1".as_bytes().to_vec(),
                     status: ItemStatus::Active,
                     hlc: HLC::new(),
                 },
@@ -138,15 +195,11 @@ mod tests {
         let _ = store
             .insert(
                 &partition1,
-                "item2".to_string(),
-                ItemEntry {
-                    item: Item {
-                        id: "item2".to_string(),
-                        message: "test2".to_string(),
-                        submitted_at: 0,
-                    },
-                    status: ItemStatus::Active,
-                    hlc: HLC::new(),
+                &storage_key2,
+                Item {
+                        message: "test2".as_bytes().to_vec(),
+                        status: ItemStatus::Active,
+                        hlc: HLC::new(),
                 },
             )
             .await;
@@ -154,13 +207,9 @@ mod tests {
         let _ = store
             .insert(
                 &partition2,
-                "item3".to_string(),
-                ItemEntry {
-                    item: Item {
-                        id: "item3".to_string(),
-                        message: "test3".to_string(),
-                        submitted_at: 0,
-                    },
+                &storage_key3,
+                Item {
+                    message: "test3".as_bytes().to_vec(),
                     status: ItemStatus::Active,
                     hlc: HLC::new(),
                 },

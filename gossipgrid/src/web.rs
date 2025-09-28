@@ -1,10 +1,11 @@
 use crate::env::Env;
 use crate::gossip::{HLC, send_gossip_single};
 use crate::item::{
-    Item, ItemEntry, ItemId, ItemStatus, ItemSubmit, ItemSubmitResponse, ItemUpdate,
+    Item, ItemEntry, ItemGenericResponseEnvelope, ItemOpsResponseEnvelope, ItemStatus, ItemCreateUpdate
 };
 use crate::node::{self, JoinedNode, NodeState};
-use crate::now_millis;
+use crate::store::{StorageKey, PartitionKey, RangeKey};
+use crate::{now_millis};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::net::{AddrParseError, SocketAddr};
@@ -46,7 +47,7 @@ pub enum ProxyMethod {
 
 pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
     node: &JoinedNode,
-    item_id: &ItemId,
+    item_id: &String,
     url: &str,
     method: ProxyMethod,
     body: Option<&T>,
@@ -124,7 +125,7 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
 
 // TODO: Implement the redirect filter for all endpoints
 async fn handle_post_task(
-    item: ItemSubmit,
+    item_submit: ItemCreateUpdate,
     socket: Arc<UdpSocket>,
     memory: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
@@ -132,15 +133,18 @@ async fn handle_post_task(
     let mut memory = memory.write().await;
     match &mut *memory {
         node::NodeState::Joined(node) => {
-            let item_entry: ItemEntry;
-            let routed_response = try_route_request::<ItemSubmit, ItemSubmitResponse>(
+            let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
-                &item.id,
+                &item_submit.partition_key,
                 "items",
                 ProxyMethod::Post,
-                Some(&item),
+                Some(&item_submit),
             )
             .await;
+            let storage_key = StorageKey::new(
+                PartitionKey(item_submit.partition_key.clone()),
+                item_submit.range_key.map(|rk| RangeKey(rk))
+            );
 
             match routed_response {
                 Ok(Some(valid_routed_response)) => Ok(warp::reply::json(&valid_routed_response)),
@@ -149,26 +153,26 @@ async fn handle_post_task(
                     let now = now_millis();
 
                     let item = Item {
-                        id: item.id.clone(),
-                        message: item.message.clone(),
-                        submitted_at: now.clone(),
-                    };
-
-                    item_entry = ItemEntry {
-                        item: item.clone(),
+                        message: item_submit.message.clone().as_bytes().to_vec(),
                         status: ItemStatus::Active,
                         hlc: HLC {
                             timestamp: now.clone(),
                             counter: 0,
                         },
                     };
+
+                    let item_entry = ItemEntry {
+                        storage_key: storage_key,
+                        item: item.clone(),
+                    };
+
                     let this_node = node.address.clone();
                     {
                         let store = env.get_store().write().await;
-                        match node.add_items(&vec![item_entry], &this_node, store).await {
+                        match node.add_items(&vec![item_entry.clone()], &this_node, store).await {
                             Ok(_) => (),
                             Err(e) => {
-                                let response = ItemSubmitResponse {
+                                let response = ItemOpsResponseEnvelope {
                                     success: None,
                                     error: Some(format!("Item submission error: {}", e)),
                                 };
@@ -179,18 +183,16 @@ async fn handle_post_task(
 
                     send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
 
-                    let response = ItemSubmitResponse {
+                    let response = ItemOpsResponseEnvelope {
                         success: Some(
-                            vec![("id".to_string(), item.id.clone())]
-                                .into_iter()
-                                .collect(),
+                            vec![item_entry]
                         ),
                         error: None,
                     };
                     Ok(warp::reply::json(&response))
                 }
                 Err(err) => {
-                    let response = ItemSubmitResponse {
+                    let response = ItemOpsResponseEnvelope {
                         success: None,
                         error: Some(err),
                     };
@@ -199,7 +201,7 @@ async fn handle_post_task(
             }
         }
         _ => {
-            let response = ItemSubmitResponse {
+            let response = ItemOpsResponseEnvelope {
                 success: None,
                 error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
             };
@@ -217,11 +219,12 @@ async fn handle_get_task(
 
     match &*memory {
         node::NodeState::Joined(node) => {
-            let item_id = req_path.split('/').last().unwrap_or_default().to_string();
-            let routed_response = try_route_request::<ItemSubmit, ItemSubmitResponse>(
+            let storage_key: StorageKey = req_path.split('/').last().unwrap_or_default().to_string().parse().unwrap();
+            let storage_key_string = storage_key.to_string();
+            let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
-                &item_id,
-                format!("items/{}", item_id).as_str(),
+                &storage_key_string,
+                format!("items/{}", &storage_key_string).as_str(),
                 ProxyMethod::Get,
                 None,
             )
@@ -230,7 +233,7 @@ async fn handle_get_task(
             if let Ok(Some(valid_routed_response)) = routed_response {
                 Ok(warp::reply::json(&valid_routed_response))
             } else if let Err(err) = routed_response {
-                let response = ItemSubmitResponse {
+                let response = ItemOpsResponseEnvelope {
                     success: None,
                     error: Some(format!("Routing error: {}", &err)),
                 };
@@ -238,10 +241,10 @@ async fn handle_get_task(
             } else {
                 let store_ref = env.get_store().read().await;
 
-                let maybe_item = match node.get_item(&item_id, &store_ref).await {
-                    Ok(item) => item,
+                let maybe_item_entry = match node.get_item(&storage_key, &store_ref).await {
+                    Ok(item_entry) => item_entry,
                     Err(e) => {
-                        let response = ItemSubmitResponse {
+                        let response = ItemOpsResponseEnvelope {
                             success: None,
                             error: Some(format!("Item retrieval error: {}", e)),
                         };
@@ -249,42 +252,36 @@ async fn handle_get_task(
                     }
                 };
 
-                if let Some(item) = maybe_item {
-                    match item.status {
+                if let Some(item_entry) = maybe_item_entry {
+                    match item_entry.item.status {
                         ItemStatus::Active => {
-                            let response = ItemSubmitResponse {
+                            let response = ItemOpsResponseEnvelope {
                                 success: Some(
-                                    vec![(
-                                        "item".to_string(),
-                                        serde_json::to_string(&item)
-                                            .expect("error parsing response"),
-                                    )]
-                                    .into_iter()
-                                    .collect(),
+                                    vec![item_entry.clone()]
                                 ),
                                 error: None,
                             };
                             Ok(warp::reply::json(&response))
                         }
                         ItemStatus::Tombstone(_) => {
-                            let response = ItemSubmitResponse {
+                            let response = ItemOpsResponseEnvelope {
                                 success: None,
-                                error: Some(format!("Item not found: {}", item_id)),
+                                error: Some(format!("Item not found: {}", &storage_key_string)),
                             };
                             Ok(warp::reply::json(&response))
                         }
                     }
                 } else {
-                    let response = ItemSubmitResponse {
+                    let response = ItemOpsResponseEnvelope {
                         success: None,
-                        error: Some(format!("Item not found: {}", item_id)),
+                        error: Some(format!("Item not found: {}", &storage_key_string)),
                     };
                     Ok(warp::reply::json(&response))
                 }
             }
         }
         _ => {
-            let response = ItemSubmitResponse {
+            let response = ItemOpsResponseEnvelope {
                 success: None,
                 error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
             };
@@ -302,7 +299,7 @@ async fn handle_get_tasks_count(
     match &*memory {
         node::NodeState::Joined(node) => {
             let tasks_count = node.items_count();
-            let response = ItemSubmitResponse {
+            let response = ItemGenericResponseEnvelope {
                 success: Some(
                     vec![("count".to_string(), tasks_count.to_string())]
                         .into_iter()
@@ -313,7 +310,7 @@ async fn handle_get_tasks_count(
             Ok(warp::reply::json(&response))
         }
         _ => {
-            let response = ItemSubmitResponse {
+            let response = ItemGenericResponseEnvelope {
                 success: None,
                 error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
             };
@@ -332,11 +329,12 @@ async fn handle_remove_task(
 
     match &mut *memory {
         node::NodeState::Joined(node) => {
-            let item_id = req_path.split('/').last().unwrap_or_default().to_string();
-            let routed_response = try_route_request::<ItemSubmit, ItemSubmitResponse>(
+            let storage_key: StorageKey = req_path.split('/').last().unwrap_or_default().parse().unwrap();
+            let storage_key_string = storage_key.to_string();
+            let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
-                &item_id,
-                format!("items/{}", item_id).as_str(),
+                &storage_key_string,
+                format!("items/{}", &storage_key_string).as_str(),
                 ProxyMethod::Delete,
                 None,
             )
@@ -345,12 +343,12 @@ async fn handle_remove_task(
             match routed_response {
                 Ok(Some(valid_routed_response)) => Ok(warp::reply::json(&valid_routed_response)),
                 Ok(None) => {
-                    let response: ItemSubmitResponse;
+                    let response: ItemGenericResponseEnvelope;
                     let this_node_addr = node.get_address().clone();
 
                     let is_success = match node
                         .remove_item(
-                            &item_id.to_string(),
+                            &storage_key,
                             &this_node_addr,
                             &mut env.get_store().write().await,
                         )
@@ -359,30 +357,30 @@ async fn handle_remove_task(
                             Err(e) => {
                                 error!("Error removing item: {}", e);
                                 return Ok(warp::reply::json(
-                                &ItemSubmitResponse {
+                                &ItemGenericResponseEnvelope {
                                     success: None,
-                                    error: Some(format!("Item not found: {}", &item_id)),
+                                    error: Some(format!("Item not found: {}", &storage_key_string)),
                                 }));
                             }
                         };
 
                     if is_success {
-                        response = ItemSubmitResponse {
-                            success: Some(vec![("id".to_string(), item_id)].into_iter().collect()),
+                        response = ItemGenericResponseEnvelope {
+                            success: Some(vec![("id".to_string(), storage_key_string.clone())].into_iter().collect()),
                             error: None,
                         };
 
                         send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
                     } else {
-                        response = ItemSubmitResponse {
+                        response = ItemGenericResponseEnvelope {
                             success: None,
-                            error: Some(format!("Item not found: {}", item_id)),
+                            error: Some(format!("Item not found: {}", &storage_key_string)),
                         };
                     }
                     Ok(warp::reply::json(&response))
                 }
                 Err(err) => {
-                    let response = ItemSubmitResponse {
+                    let response = ItemGenericResponseEnvelope {
                         success: None,
                         error: Some(err),
                     };
@@ -391,7 +389,7 @@ async fn handle_remove_task(
             }
         }
         _ => {
-            let response = ItemSubmitResponse {
+            let response = ItemOpsResponseEnvelope {
                 success: None,
                 error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
             };
@@ -401,20 +399,21 @@ async fn handle_remove_task(
 }
 
 async fn handle_update_task(
-    item: ItemUpdate,
+    item: ItemCreateUpdate,
     req_path: String,
     memory: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let item_id = req_path.split('/').last().unwrap_or_default().to_string();
+    let storage_key: StorageKey  = req_path.split('/').last().unwrap_or_default().parse().unwrap();
+    let storage_key_string = storage_key.to_string();
     let mut memory = memory.write().await;
 
     match &mut *memory {
         node::NodeState::Joined(node) => {
-            let routed_response = try_route_request::<ItemUpdate, ItemSubmitResponse>(
+            let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
-                &item_id,
-                format!("items/{}", item_id).as_str(),
+                &storage_key_string,
+                format!("items/{}", &storage_key_string).as_str(),
                 ProxyMethod::Put,
                 Some(&item),
             )
@@ -424,12 +423,12 @@ async fn handle_update_task(
                 Ok(Some(valid_routed_response)) => Ok(warp::reply::json(&valid_routed_response)),
                 Ok(None) => {
                     info!("Routing to this node");
-                    let response: ItemSubmitResponse;
+                    let response: ItemOpsResponseEnvelope;
 
-                    let maybe_item = match node.get_item(&item_id, &env.get_store().read().await).await {
+                    let maybe_item = match node.get_item(&storage_key, &env.get_store().read().await).await {
                         Ok(item) => item,
                         Err(e) => {
-                            let response = ItemSubmitResponse {
+                            let response = ItemOpsResponseEnvelope {
                                 success: None,
                                 error: Some(format!("Item retrieval error: {}", e)),
                             };
@@ -440,28 +439,27 @@ async fn handle_update_task(
                     if maybe_item.is_some()
                     {
                         let new_item_entry = ItemEntry {
+                            storage_key: storage_key.clone(),
                             item: Item {
-                                id: item_id.to_string(),
-                                message: item.message.clone(),
-                                submitted_at: now_millis(),
-                            },
-                            status: ItemStatus::Active,
-                            hlc: HLC {
-                                timestamp: now_millis(),
-                                counter: 0,
-                            },
+                                message: item.message.as_bytes().to_vec(),
+                                status: ItemStatus::Active,
+                                hlc: HLC {
+                                    timestamp: now_millis(),
+                                    counter: 0,
+                                },
+                            }
                         };
 
                         let node_address = node.get_address().clone();
                         match node.add_items(
-                            &vec![new_item_entry],
+                            &vec![new_item_entry.clone()],
                             &node_address,
                             env.get_store().write().await,
                         )
                         .await {
                             Ok(_) => (),
                             Err(e) => {
-                                let response = ItemSubmitResponse {
+                                let response = ItemOpsResponseEnvelope {
                                     success: None,
                                     error: Some(format!("Item update error: {}", e)),
                                 };
@@ -469,27 +467,22 @@ async fn handle_update_task(
                             }
                         }
 
-                        response = ItemSubmitResponse {
+                        response = ItemOpsResponseEnvelope {
                             success: Some(
-                                vec![
-                                    ("message".to_string(), "Item updated".to_string()),
-                                    ("id".to_string(), item_id.clone()),
-                                ]
-                                .into_iter()
-                                .collect(),
+                                vec![new_item_entry]
                             ),
                             error: None,
                         };
                     } else {
-                        response = ItemSubmitResponse {
+                        response = ItemOpsResponseEnvelope {
                             success: None,
-                            error: Some(format!("Item not found: {}", item_id)),
+                            error: Some(format!("Item not found: {}", &storage_key_string)),
                         };
                     }
                     Ok(warp::reply::json(&response))
                 }
                 Err(err) => {
-                    let response = ItemSubmitResponse {
+                    let response = ItemOpsResponseEnvelope {
                         success: None,
                         error: Some(format!("Routing error: {}", &err)),
                     };
@@ -498,7 +491,7 @@ async fn handle_update_task(
             }
         }
         _ => {
-            let response = ItemSubmitResponse {
+            let response = ItemOpsResponseEnvelope {
                 success: None,
                 error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
             };
@@ -546,7 +539,7 @@ pub async fn web_server(
         .and(warp::body::json())
         .and(with_env(env.clone()))
         .and_then(
-            |req_path: String, memory: Arc<RwLock<NodeState>>, item: ItemUpdate, env: Arc<Env>| {
+            |req_path: String, memory: Arc<RwLock<NodeState>>, item: ItemCreateUpdate, env: Arc<Env>| {
                 handle_update_task(item, req_path, memory, env)
             },
         );
@@ -573,8 +566,9 @@ mod tests {
     async fn simple_test() {
         let client = reqwest::Client::new();
 
-        let payload = ItemSubmit {
-            id: "123".to_string(),
+        let payload = ItemCreateUpdate {
+            partition_key: "123".to_string(),
+            range_key: Some("range1".to_string()),
             message: "Test item".to_string(),
         };
 

@@ -1,8 +1,8 @@
 use crate::env::Env;
 use crate::gossip::{HLC, receive_gossip, send_gossip_on_interval};
-use crate::item::{ItemEntry, ItemId, ItemStatus};
+use crate::item::{Item, ItemEntry, ItemStatus};
 use crate::partition::{PartitionMap, PartitionId};
-use crate::store::Store;
+use crate::store::{StorageKey, Store};
 use crate::{now_millis, web};
 use bincode::{Decode, Encode};
 use log::{error, info};
@@ -123,9 +123,9 @@ pub struct JoinedNode {
     pub partition_counts: HashMap<NodeId, HashMap<PartitionId, usize>>,
     pub node_hlc: HLC,
     // Stores the items that need to be gossiped to other nodes
-    pub items_delta_state: HashMap<ItemId, DeltaAckState>,
+    pub items_delta_state: HashMap<String, DeltaAckState>,
     // Stores the origin of the delta item to avoid sending it back to the same node
-    pub items_delta_cache: TtlCache<ItemId, DeltaOrigin>,
+    pub items_delta_cache: TtlCache<String, DeltaOrigin>,
     pub index: BTreeMap<HLC, HashSet<String>>,
     pub next_node_index: u8,
 }
@@ -384,23 +384,24 @@ impl JoinedNode {
         entry: ItemEntry,
         from_node: &str,
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
-    ) -> Result<Option<ItemEntry>, NodeError> {
-        let partition = self.partition_map.hash_key(&entry.item.id);
+    ) -> Result<Option<Item>, NodeError> {
+        let storage_key_string = entry.storage_key.to_string();
+        let partition = self.partition_map.hash_key(&entry.storage_key.partition_key.value());
 
-        let maybe_existing_entry = store.get(&partition, &entry.item.id).await.map_err(|e| {
+        let maybe_existing_item = store.get(&partition, &entry.storage_key).await.map_err(|e| {
             NodeError::ItemOperationError(e.to_string())
         })?;
 
-        if let Some(existing_entry) = maybe_existing_entry {
-            if entry.hlc > existing_entry.hlc {
-                let new_entry = ItemEntry {
-                    item: entry.item.clone(),
-                    status: entry.status.clone(),
-                    hlc: HLC::merge(&existing_entry.hlc, &entry.hlc, now_millis()),
+        if let Some(existing_entry) = maybe_existing_item {
+            if entry.item.hlc > existing_entry.item.hlc {
+                let new_item = Item {
+                    message: entry.item.message.clone(),
+                    status: entry.item.status.clone(),
+                    hlc: HLC::merge(&existing_entry.item.hlc, &entry.item.hlc, now_millis()),
                 };
 
                 store
-                    .insert(&partition, entry.item.id.clone(), new_entry.clone())
+                    .insert(&partition, &entry.storage_key, new_item.clone())
                     .await.map_err(|e| {
                         NodeError::ItemOperationError(e.to_string())
                     })?;
@@ -408,30 +409,30 @@ impl JoinedNode {
                 info!(
                     "node={}; Updated item {} with new entry: {:?}",
                     self.get_address(),
-                    entry.item.id,
-                    &new_entry
+                    entry.storage_key.to_string(),
+                    &new_item
                 );
 
                 // Update the delta and cache
                 self.items_delta_cache.insert(
-                    entry.item.id.clone(),
+                    storage_key_string.clone(),
                     DeltaOrigin {
                         node_id: from_node.to_string(),
-                        item_hlc: new_entry.hlc.clone(),
+                        item_hlc: new_item.hlc.clone(),
                     },
                     Duration::from_secs(60),
                 );
-                self.invalidate_delta_state(&entry.item.id);
+                self.invalidate_delta_state(&storage_key_string);
 
-                Ok(Some(new_entry.clone()))
+                Ok(Some(new_item.clone()))
             } else {
                 // If the new entry is older we do nothing
                 info!(
                     "node={}; Received an update for item {} that is older or equal to the existing entry, ignoring it. Incoming {:?} vs Existing {:?}",
                     self.get_address(),
-                    entry.item.id,
-                    &entry.hlc,
-                    &existing_entry.hlc
+                    &storage_key_string,
+                    &entry.item.hlc,
+                    &existing_entry.item.hlc
                 );
                 Ok(None)
             }
@@ -439,30 +440,29 @@ impl JoinedNode {
             // Add new item
             let new_entry = entry.clone();
             store
-                .insert(&partition, entry.item.id.clone(), new_entry.clone())
+                .insert(&partition, &entry.storage_key, new_entry.item.clone())
                 .await.map_err(|e| {
                     NodeError::ItemOperationError(e.to_string())
                 })?;
 
 
             info!(
-                "node={}; Added new item {}: {:?}",
+                "node={}; Added new item {}",
                 self.get_address(),
-                entry.item.id,
-                &new_entry
+                &storage_key_string
             );
 
             // Add to delta cache
             self.items_delta_cache.insert(
-                entry.item.id.clone(),
+                storage_key_string.clone(),
                 DeltaOrigin {
                     node_id: from_node.to_string(),
-                    item_hlc: new_entry.hlc.clone(),
+                    item_hlc: new_entry.item.hlc.clone(),
                 },
                 Duration::from_secs(60),
             );
 
-            Ok(Some(new_entry.clone()))
+            Ok(Some(new_entry.item.clone()))
         }
     }
 
@@ -471,7 +471,7 @@ impl JoinedNode {
         items: &[ItemEntry],
         from_node: &str,
         store: RwLockWriteGuard<'_, Box<dyn Store>>,
-    ) -> Result<Vec<ItemEntry>, NodeError> {
+    ) -> Result<Vec<Item>, NodeError> {
         let mut added_items = vec![];
         let mut store_ref = store;
 
@@ -510,20 +510,21 @@ impl JoinedNode {
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
     ) -> Result<(), NodeError> {
         for ack_item in ack_delta_items {
-            if let Some(delta_ack) = self.items_delta_state.get_mut(&ack_item.item.id) {
+            let storage_key_string = ack_item.storage_key.to_string();
+            if let Some(delta_ack) = self.items_delta_state.get_mut(&storage_key_string) {
                 delta_ack.peers_pending.remove(from_node);
 
                 if delta_ack.peers_pending.is_empty() {
                     info!(
                         "node={}; removing item {} from delta state as all peers have acknowledged it",
                         self.get_address(),
-                        &ack_item.item.id
+                        &storage_key_string
                     );
-                    store.remove_from_delta(&ack_item.item.id).await.map_err(|e| {
+                    store.remove_from_delta(&ack_item.storage_key).await.map_err(|e| {
                         NodeError::ItemOperationError(e.to_string())
                     })?;
 
-                    self.items_delta_state.remove(&ack_item.item.id);
+                    self.items_delta_state.remove(&storage_key_string);
                 }
             }
         }
@@ -533,19 +534,20 @@ impl JoinedNode {
     /// Add new items to delta state
     pub fn add_delta_state(&mut self, items: &[ItemEntry], delta_ack_state: DeltaAckState) {
         for item in items {
-            if let Some(delta_ack) = self.items_delta_state.get_mut(&item.item.id) {
+            let storage_key_string = item.storage_key.to_string();
+            if let Some(delta_ack) = self.items_delta_state.get_mut(&storage_key_string) {
                 delta_ack
                     .peers_pending
                     .extend(delta_ack_state.peers_pending.clone());
                 delta_ack.created_at = now_millis();
             } else {
                 self.items_delta_state
-                    .insert(item.item.id.clone(), delta_ack_state.clone());
+                    .insert(storage_key_string.clone(), delta_ack_state.clone());
             }
             info!(
                 "node={}; Added to delta state for item {}: {:?}",
                 self.get_address(),
-                &item.item.id,
+                storage_key_string,
                 &delta_ack_state
             );
         }
@@ -588,7 +590,7 @@ impl JoinedNode {
         Ok(())
     }
 
-    pub fn get_delta_state(&self) -> HashMap<ItemId, DeltaAckState> {
+    pub fn get_delta_state(&self) -> HashMap<String, DeltaAckState> {
         self.items_delta_state.clone()
     }
 
@@ -605,8 +607,9 @@ impl JoinedNode {
         })?;
 
         for item_entry in item_entries.iter() {
-            if let Some(cached_item) = self.items_delta_cache.get(item_entry.item.id.as_str()) {
-                if !(cached_item.node_id == *node && cached_item.item_hlc >= item_entry.hlc) {
+            let storage_key_string = item_entry.storage_key.to_string();
+            if let Some(cached_item) = self.items_delta_cache.get(&storage_key_string) {
+                if !(cached_item.node_id == *node && cached_item.item_hlc >= item_entry.item.hlc) {
                     items.push(item_entry.clone());
                 }
             } else {
@@ -618,35 +621,36 @@ impl JoinedNode {
 
     pub async fn remove_item(
         &mut self,
-        item_id: &str,
+        storage_key: &StorageKey,
         from_node: &str,
         store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
     ) -> Result<bool, NodeError> {
         let this_node = self.get_address().clone();
-        let partition = self.partition_map.hash_key(item_id);
+        let store_key_string = storage_key.to_string();
+        let partition = self.partition_map.hash_key(&store_key_string);
 
-        let maybe_existing_entry = store.get(&partition, item_id).await.map_err(|e| {
+        let maybe_existing_entry = store.get(&partition, storage_key).await.map_err(|e| {
             NodeError::ItemOperationError(e.to_string())
         })?;
 
         if let Some(existing_entry) = maybe_existing_entry {
             let mut new_item_entry = existing_entry.clone();
             let now_millis = now_millis();
-            new_item_entry.status = ItemStatus::Tombstone(now_millis);
-            new_item_entry.hlc.tick_hlc(now_millis);
+            new_item_entry.item.status = ItemStatus::Tombstone(now_millis);
+            new_item_entry.item.hlc.tick_hlc(now_millis);
 
             store
-                .insert(&partition, item_id.to_string(), new_item_entry.clone())
+                .insert(&partition, storage_key, new_item_entry.item.clone())
                 .await.map_err(|e| {
                     NodeError::ItemOperationError(e.to_string())
                 })?;
 
             // Update the delta and cache
             self.items_delta_cache.insert(
-                item_id.to_string(),
+                store_key_string.clone(),
                 DeltaOrigin {
                     node_id: from_node.to_string(),
-                    item_hlc: new_item_entry.hlc.clone(),
+                    item_hlc: new_item_entry.item.hlc.clone(),
                 },
                 Duration::from_secs(60),
             );
@@ -660,7 +664,7 @@ impl JoinedNode {
             };
 
             self.update_partition_counts(&this_node, partition_counts);
-            self.invalidate_delta_state(item_id);
+            self.invalidate_delta_state(&store_key_string);
             return Ok(true);
         } else {
             return Ok(false); // Node not found
@@ -696,11 +700,11 @@ impl JoinedNode {
 
     pub async fn get_item(
         &self,
-        item_id: &str,
+        store_key: &StorageKey,
         store: &RwLockReadGuard<'_, Box<dyn Store>>,
     ) -> Result<Option<ItemEntry>, NodeError> {
-        let partition = self.partition_map.hash_key(item_id);
-        let maybe_item = store.get(&partition, item_id).await.map_err(|e| {
+        let partition = self.partition_map.hash_key(&store_key.partition_key.value());
+        let maybe_item = store.get(&partition, store_key).await.map_err(|e| {
             NodeError::ItemOperationError(e.to_string())
         })?;
 
@@ -729,27 +733,27 @@ impl JoinedNode {
             .insert(node_id.to_string(), partition_counts);
     }
 
-    pub async fn items_since(
-        &self,
-        hlc: &HLC,
-        store: &RwLockReadGuard<'_, Box<dyn Store>>,
-    ) -> Result<Vec<ItemEntry>, NodeError> {
-        let mut items = vec![];
-        for (_, set) in self.index.range(hlc..).rev() {
-            for item_id in set {
-                let partition = self.partition_map.hash_key(item_id);
+    // pub async fn items_since(
+    //     &self,
+    //     hlc: &HLC,
+    //     store: &RwLockReadGuard<'_, Box<dyn Store>>,
+    // ) -> Result<Vec<ItemEntry>, NodeError> {
+    //     let mut items = vec![];
+    //     for (_, set) in self.index.range(hlc..).rev() {
+    //         for item_id in set {
+    //             let partition = self.partition_map.hash_key(item_id);
 
-                let maybe_item = store.get(&partition, item_id).await.map_err(|e| {
-                    NodeError::ItemOperationError(e.to_string())
-                })?;
+    //             let maybe_item = store.get(&partition, item_id).await.map_err(|e| {
+    //                 NodeError::ItemOperationError(e.to_string())
+    //             })?;
 
-                if let Some(item) = maybe_item {
-                    items.push(item.clone());
-                }
-            }
-        }
-        Ok(items)
-    }
+    //             if let Some(item) = maybe_item {
+    //                 items.push(item.clone());
+    //             }
+    //         }
+    //     }
+    //     Ok(items)
+    // }
 }
 
 #[cfg(test)]
@@ -758,45 +762,45 @@ mod tests {
     use crate::gossip::HLC;
     use crate::item::{Item, ItemStatus};
 
-    #[tokio::test]
-    async fn test_reconcile_delta() {
-        let cluster_config = ClusterConfig {
-            cluster_size: 2,
-            partition_count: 8,
-            replication_factor: 2,
-        };
+    // #[tokio::test]
+    // async fn test_reconcile_delta() {
+    //     let cluster_config = ClusterConfig {
+    //         cluster_size: 2,
+    //         partition_count: 8,
+    //         replication_factor: 2,
+    //     };
 
-        let mut node_state = NodeState::init(
-            "127.0.0.1:1000".to_string(),
-            3001,
-            None,
-            Some(cluster_config),
-        );
+    //     let mut node_state = NodeState::init(
+    //         "127.0.0.1:1000".to_string(),
+    //         3001,
+    //         None,
+    //         Some(cluster_config),
+    //     );
 
-        let item1 = ItemEntry {
-            item: Item {
-                id: "task1".to_string(),
-                message: "task1 message".to_string(),
-                submitted_at: 100,
-            },
-            status: ItemStatus::Active,
-            hlc: HLC {
-                timestamp: 100,
-                counter: 0,
-            },
-        };
-        let item2 = ItemEntry {
-            item: Item {
-                id: "task2".to_string(),
-                message: "task2 message".to_string(),
-                submitted_at: 101,
-            },
-            status: ItemStatus::Active,
-            hlc: HLC {
-                timestamp: 101,
-                counter: 0,
-            },
-        };
+    //     let item1 = ItemEntry {
+    //         item: Item {
+    //             id: "task1".to_string(),
+    //             message: "task1 message".to_string(),
+    //             submitted_at: 100,
+    //         },
+    //         status: ItemStatus::Active,
+    //         hlc: HLC {
+    //             timestamp: 100,
+    //             counter: 0,
+    //         },
+    //     };
+    //     let item2 = ItemEntry {
+    //         item: Item {
+    //             id: "task2".to_string(),
+    //             message: "task2 message".to_string(),
+    //             submitted_at: 101,
+    //         },
+    //         status: ItemStatus::Active,
+    //         hlc: HLC {
+    //             timestamp: 101,
+    //             counter: 0,
+    //         },
+    //     };
 
         // match &mut node_state {
         //     NodeState::Joined(joined_node) => {
@@ -822,5 +826,5 @@ mod tests {
         //     }
         //     _ => panic!("Node is not in Joined state"),
         // }
-    }
+    // }
 }

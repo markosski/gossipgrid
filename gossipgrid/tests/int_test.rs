@@ -1,5 +1,5 @@
 use gossipgrid::{
-    item::ItemSubmitResponse,
+    item::ItemOpsResponseEnvelope,
     node::{NodeState},
 };
 
@@ -14,26 +14,28 @@ async fn test_publish_and_retrieve_item() {
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
-    let _ = client
+    let post_resp = client
         .post("http://localhost:3001/items")
-        .body(r#"{"id": "123", "message": "foo1"}"#)
+        .body(r#"{"partition_key": "123", "range_key": "456", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
+    assert!(post_resp.status().is_success());
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let res = client
-        .get("http://localhost:3002/items/123")
+        .get("http://localhost:3002/items/123_456")
         .send()
         .await
         .unwrap();
+    assert!(res.status().is_success());
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let item_id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
 
-    assert!(id.contains("123"));
+    assert!(item_id.contains("123_456"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -59,7 +61,7 @@ async fn test_publish_and_delete_item() {
     let client = reqwest::Client::new();
     let _ = client
         .post("http://localhost:3001/items")
-        .body(r#"{"id": "123", "message": "foo1"}"#)
+        .body(r#"{"partition_key": "123", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
@@ -73,9 +75,9 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
 
     assert!(id.contains("123"));
 
@@ -97,7 +99,7 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
     assert!(response.error.unwrap().contains("Item not found"));
@@ -125,7 +127,7 @@ async fn test_publish_and_update_item() {
     let client = reqwest::Client::new();
     let _ = client
         .post("http://localhost:3001/items")
-        .body(r#"{"id": "123", "message": "foo1"}"#)
+        .body(r#"{"partition_key": "123", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
@@ -138,9 +140,9 @@ async fn test_publish_and_update_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
 
     assert!(id.contains("123"));
 
@@ -148,7 +150,7 @@ async fn test_publish_and_update_item() {
 
     let _ = client
         .post("http://localhost:3002/items")
-        .body(r#"{"id": "123", "message": "foo2"}"#)
+        .body(r#"{"partition_key": "123", "message": "foo2"}"#)
         .send()
         .await
         .unwrap();
@@ -161,11 +163,12 @@ async fn test_publish_and_update_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let item_entry = response.success.unwrap().get(0).unwrap().clone();
+    let message = String::from_utf8(item_entry.item.message.clone()).unwrap();
 
-    assert!(id.contains("foo2"));
+    assert!(message.contains("foo2"));
 
     // verify node received ack and updated its delta state
     // none of the nodes should have the item
