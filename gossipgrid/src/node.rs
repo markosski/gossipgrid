@@ -711,6 +711,20 @@ impl JoinedNode {
         Ok(maybe_item)
     }
 
+    pub async fn get_items(
+        &self,
+        limit: usize,
+        store_key: &StorageKey,
+        store: &RwLockReadGuard<'_, Box<dyn Store>>,
+    ) -> Result<Vec<ItemEntry>, NodeError> {
+        let partition = self.partition_map.hash_key(&store_key.partition_key.value());
+        let maybe_item = store.get_many(&partition, store_key, limit).await.map_err(|e| {
+            NodeError::ItemOperationError(e.to_string())
+        })?;
+
+        Ok(maybe_item)
+    }
+
     pub fn items_count(&self) -> usize {
         let mut unique_partitions = HashMap::<PartitionId, usize>::new();
         for node_partitions in self.partition_counts.iter() {

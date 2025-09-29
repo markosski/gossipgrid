@@ -241,7 +241,7 @@ async fn handle_get_task(
             } else {
                 let store_ref = env.get_store().read().await;
 
-                let maybe_item_entry = match node.get_item(&storage_key, &store_ref).await {
+                let item_entries = match node.get_items(10, &storage_key, &store_ref).await {
                     Ok(item_entry) => item_entry,
                     Err(e) => {
                         let response = ItemOpsResponseEnvelope {
@@ -252,29 +252,18 @@ async fn handle_get_task(
                     }
                 };
 
-                if let Some(item_entry) = maybe_item_entry {
-                    match item_entry.item.status {
-                        ItemStatus::Active => {
-                            let response = ItemOpsResponseEnvelope {
-                                success: Some(
-                                    vec![item_entry.clone()]
-                                ),
-                                error: None,
-                            };
-                            Ok(warp::reply::json(&response))
-                        }
-                        ItemStatus::Tombstone(_) => {
-                            let response = ItemOpsResponseEnvelope {
-                                success: None,
-                                error: Some(format!("Item not found: {}", &storage_key_string)),
-                            };
-                            Ok(warp::reply::json(&response))
-                        }
-                    }
+                if item_entries.len() > 0 {
+                    let response = ItemOpsResponseEnvelope {
+                        success: Some(
+                            item_entries 
+                        ),
+                        error: None,
+                    };
+                    Ok(warp::reply::json(&response))
                 } else {
                     let response = ItemOpsResponseEnvelope {
                         success: None,
-                        error: Some(format!("Item not found: {}", &storage_key_string)),
+                        error: Some(format!("No items found: {}", &storage_key_string)),
                     };
                     Ok(warp::reply::json(&response))
                 }

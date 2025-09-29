@@ -26,8 +26,8 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, partition: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
-        let maybe_partition = self.item_partitions.get(&partition);
+    async fn get(&self, partition_id: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
+        let maybe_partition = self.item_partitions.get(&partition_id);
         if let Some(partition) = maybe_partition {
             Ok(partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone())))
         } else {
@@ -35,10 +35,29 @@ impl Store for InMemoryStore {
         }
     }
 
-    async fn get_many(&self, partition: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
-        // TODO: loop through items match on parittion key and partial match on range key
-        // return up to limit items
-        Ok(vec![])
+    async fn get_many(&self, partition_id: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+        let maybe_partition = self.item_partitions.get(&partition_id);
+        let mut data: Vec<ItemEntry> = vec!();
+        let mut counter = 0;
+        if let Some(partition) = maybe_partition {
+            for (storage_key, item) in partition.iter() {
+                if counter == limit {
+                    break;
+                }
+
+                if storage_key.partition_key == key.partition_key {
+                    if let (Some(range_key), Some(key_range_key)) = (&storage_key.range_key, &key.range_key) 
+                    && range_key.value().contains(key_range_key.value()) {
+                        data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
+                        counter += 1;
+                    } else {
+                        data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
+                        counter += 1;
+                    }
+                }
+            }
+        }
+        Ok(data)
     }
 
     async fn insert(&mut self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {

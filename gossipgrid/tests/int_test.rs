@@ -53,6 +53,47 @@ async fn test_publish_and_retrieve_item() {
 }
 
 #[tokio::test]
+async fn test_publish_and_retrieve_many_item() {
+    env_logger::init();
+
+    log::info!("Starting test_publish_and_retrieve_item");
+
+    let nodes = helpers::start_test_cluster(3, 3).await;
+
+    let client = reqwest::Client::new();
+    let _ = client
+        .post("http://localhost:3001/items")
+        .body(r#"{"partition_key": "123", "range_key": "456", "message": "foo1"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client
+        .post("http://localhost:3002/items")
+        .body(r#"{"partition_key": "123", "range_key": "457", "message": "foo2"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let res = client
+        .get("http://localhost:3002/items/123?limit=10")
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+
+    let response: ItemOpsResponseEnvelope =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let items = response.success.unwrap();
+
+    assert!(items.len() == 2);
+
+    helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
+}
+
+#[tokio::test]
 async fn test_publish_and_delete_item() {
     env_logger::init();
 
