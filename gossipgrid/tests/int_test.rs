@@ -14,13 +14,20 @@ async fn test_publish_and_retrieve_item() {
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
-    let post_resp = client
+    let _ = client
         .post("http://localhost:3001/items")
         .body(r#"{"partition_key": "123", "range_key": "456", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
-    assert!(post_resp.status().is_success());
+
+    // Submitting another item to ensure we are fetching the correct one
+    let _ = client
+        .post("http://localhost:3001/items")
+        .body(r#"{"partition_key": "123", "range_key": "457", "message": "foo1"}"#)
+        .send()
+        .await
+        .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
@@ -33,8 +40,11 @@ async fn test_publish_and_retrieve_item() {
 
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+
+    let item_count = response.success.as_ref().unwrap().len().clone();
     let item_id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
 
+    assert!(item_count == 1);
     assert!(item_id.contains("123_456"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -46,7 +56,7 @@ async fn test_publish_and_retrieve_item() {
     };
 
     let count = node.items_count();
-    assert_eq!(count, 1);
+    assert_eq!(count, 2);
     drop(node_guard);
 
     helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
@@ -143,7 +153,7 @@ async fn test_publish_and_delete_item() {
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
-    assert!(response.error.unwrap().contains("Item not found"));
+    assert!(response.error.unwrap().contains("No items found"));
 
     // verify cluster item count
     let node_guard = nodes[2].1.read().await;

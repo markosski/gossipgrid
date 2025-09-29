@@ -5,7 +5,7 @@ use log::info;
 use crate::partition::{PartitionId};
 
 // Add this import or definition for ItemId
-use crate::item::{self, Item, ItemEntry};
+use crate::item::{self, Item, ItemEntry, ItemStatus};
 use crate::store::{DataStoreError, StorageKey};
 
 use super::Store; // or define: type ItemId = String;
@@ -29,7 +29,16 @@ impl Store for InMemoryStore {
     async fn get(&self, partition_id: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
         let maybe_partition = self.item_partitions.get(&partition_id);
         if let Some(partition) = maybe_partition {
-            Ok(partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone())))
+            let item_entry = partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone()));
+            if let Some(item) = item_entry && item.item.status == ItemStatus::Active {
+                if item.item.status == ItemStatus::Active {
+                    Ok(Some(item))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
@@ -45,12 +54,12 @@ impl Store for InMemoryStore {
                     break;
                 }
 
-                if storage_key.partition_key == key.partition_key {
+                if item.status == ItemStatus::Active && storage_key.partition_key == key.partition_key {
                     if let (Some(range_key), Some(key_range_key)) = (&storage_key.range_key, &key.range_key) 
                     && range_key.value().contains(key_range_key.value()) {
                         data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
                         counter += 1;
-                    } else {
+                    } else if key.range_key.is_none() {
                         data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
                         counter += 1;
                     }

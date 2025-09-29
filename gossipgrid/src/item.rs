@@ -25,7 +25,7 @@ impl ItemEntry {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub enum ItemStatus {
     Active,
     Tombstone(u64),
