@@ -1,11 +1,13 @@
 use crate::env::Env;
 use crate::gossip::{HLC, send_gossip_single};
 use crate::item::{
-    Item, ItemEntry, ItemGenericResponseEnvelope, ItemOpsResponseEnvelope, ItemStatus, ItemCreateUpdate
+    Item, ItemEntry, ItemStatus
 };
 use crate::node::{self, JoinedNode, NodeState};
 use crate::store::{StorageKey, PartitionKey, RangeKey};
 use crate::{now_millis};
+use base64::engine::general_purpose;
+use bincode::{Decode, Encode};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use warp::filters::path::FullPath;
@@ -19,6 +21,56 @@ use warp::Filter;
 
 const CANNOT_PERFORM_ACTION_IN_CURRENT_STATE: &str =
     "Cannot perform action in current state, is cluster ready?";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemResponse {
+    pub message: String,
+    pub status: ItemStatus,
+    pub hlc: HLC
+}
+
+impl ItemResponse {
+    pub fn message_string(&self) -> Result<String, String> {
+        use base64::prelude::*;
+
+        let decoded_bytes = general_purpose::STANDARD.decode(&self.message).map_err(|e| e.to_string())?;
+        match String::from_utf8(decoded_bytes) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+impl From<Item> for ItemResponse {
+    fn from(item: Item) -> Self {
+        use base64::prelude::*;
+
+        ItemResponse {
+            message: general_purpose::STANDARD.encode(&item.message),
+            status: item.status,
+            hlc: item.hlc
+        }
+    }
+}
+
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+pub struct ItemCreateUpdate {
+    pub partition_key: String,
+    pub range_key: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ItemOpsResponseEnvelope {
+    pub success: Option<Vec<ItemResponse>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ItemGenericResponseEnvelope {
+    pub success: Option<HashMap<String, String>>,
+    pub error: Option<String>,
+}
 
 // HTTP server implementation
 fn with_memory(
@@ -44,6 +96,16 @@ pub enum ProxyMethod {
     Get,
     Post,
     Delete,
+}
+
+fn map_to_query_string(params: &HashMap<String, String>) -> String {
+    params.iter().fold("".to_string(), |acc, (k, v)| {
+        if acc.is_empty() {
+            format!("?{}={}", k, v)
+        } else {
+            format!("{}&{}={}", acc, k, v)
+        }
+    })
 }
 
 pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
@@ -187,7 +249,7 @@ async fn handle_post_item(
 
                     let response = ItemOpsResponseEnvelope {
                         success: Some(
-                            vec![item_entry]
+                            vec![item_entry.item.into()]
                         ),
                         error: None,
                     };
@@ -225,14 +287,7 @@ async fn handle_get_items(
         node::NodeState::Joined(node) => {
             let storage_key: StorageKey = store_key.parse().unwrap();
             let storage_key_string = storage_key.to_string();
-
-            let query_with_q = params.iter().fold("".to_string(), |acc, (k, v)| {
-                if acc.is_empty() {
-                    format!("?{}={}", k, v)
-                } else {
-                    format!("{}&{}={}", acc, k, v)
-                }
-            });
+            let query_with_q = map_to_query_string(&params);
 
             let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
@@ -270,7 +325,7 @@ async fn handle_get_items(
                 if item_entries.len() > 0 {
                     let response = ItemOpsResponseEnvelope {
                         success: Some(
-                            item_entries 
+                            item_entries.iter().cloned().map(|ie| ie.item.into()).collect()
                         ),
                         error: None,
                     };

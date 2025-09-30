@@ -1,6 +1,9 @@
 use gossipgrid::{
-    item::ItemOpsResponseEnvelope,
     node::{NodeState},
+};
+
+use gossipgrid::web::{
+    ItemOpsResponseEnvelope
 };
 
 mod helpers;
@@ -40,10 +43,10 @@ async fn test_publish_and_retrieve_items() {
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
     let item_count = response.success.as_ref().unwrap().len().clone();
-    let item_id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
+    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
 
     assert!(item_count == 1);
-    assert!(item_id.contains("123_456"));
+    assert!(item_msg.contains("foo1"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -139,9 +142,9 @@ async fn test_publish_and_delete_item() {
 
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
+    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
 
-    assert!(id.contains("123"));
+    assert!(item_msg.contains("foo1"));
 
     // verify item is deleted
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -204,9 +207,9 @@ async fn test_publish_and_upsert_item() {
 
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get(0).unwrap().storage_key.to_string();
+    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
 
-    assert!(id.contains("123"));
+    assert!(item_msg.contains("foo1"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -227,8 +230,8 @@ async fn test_publish_and_upsert_item() {
 
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let item_entry = response.success.unwrap().get(0).unwrap().clone();
-    let message = String::from_utf8(item_entry.item.message.clone()).unwrap();
+    let item_resp = response.success.unwrap().get(0).unwrap().clone();
+    let message = item_resp.message_string().unwrap();
 
     assert!(message.contains("foo2"));
 

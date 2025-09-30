@@ -1,7 +1,6 @@
 use crate::{gossip::HLC, store::StorageKey};
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, hash::Hash};
 
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct Item {
@@ -29,25 +28,6 @@ impl ItemEntry {
 pub enum ItemStatus {
     Active,
     Tombstone(u64),
-}
-
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
-pub struct ItemCreateUpdate {
-    pub partition_key: String,
-    pub range_key: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ItemOpsResponseEnvelope {
-    pub success: Option<Vec<ItemEntry>>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ItemGenericResponseEnvelope {
-    pub success: Option<HashMap<String, String>>,
-    pub error: Option<String>,
 }
 
 #[cfg(test)]
