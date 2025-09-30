@@ -8,6 +8,8 @@ use crate::store::{StorageKey, PartitionKey, RangeKey};
 use crate::{now_millis};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
+use warp::filters::path::FullPath;
+use std::collections::HashMap;
 use std::net::{AddrParseError, SocketAddr};
 
 use std::sync::Arc;
@@ -41,7 +43,6 @@ fn with_env(
 pub enum ProxyMethod {
     Get,
     Post,
-    Put,
     Delete,
 }
 
@@ -103,13 +104,13 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
     );
 
     let client = reqwest::Client::new();
+    // TODO: remove hard coded scheme
     let resp_builder = match method {
-        ProxyMethod::Get => client.get(format!("http://{}/{}", web_host, url)),
+        ProxyMethod::Get => client.get(format!("http://{}{}", web_host, url)),
         ProxyMethod::Post => client
-            .post(format!("http://{}/{}", web_host, url))
+            .post(format!("http://{}{}", web_host, url))
             .json(&body.expect("Body is required for POST")),
-        ProxyMethod::Put => client.put(format!("http://{}/{}", web_host, url)),
-        ProxyMethod::Delete => client.delete(format!("http://{}/{}", web_host, url)),
+        ProxyMethod::Delete => client.delete(format!("http://{}{}", web_host, url)),
     };
 
     let resp = resp_builder
@@ -124,7 +125,8 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
 }
 
 // TODO: Implement the redirect filter for all endpoints
-async fn handle_post_task(
+async fn handle_post_item(
+    req_path: FullPath,
     item_submit: ItemCreateUpdate,
     socket: Arc<UdpSocket>,
     memory: Arc<RwLock<NodeState>>,
@@ -136,7 +138,7 @@ async fn handle_post_task(
             let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
                 &item_submit.partition_key,
-                "items",
+                req_path.as_str(),
                 ProxyMethod::Post,
                 Some(&item_submit),
             )
@@ -210,8 +212,10 @@ async fn handle_post_task(
     }
 }
 
-async fn handle_get_task(
-    req_path: String,
+async fn handle_get_items(
+    store_key: String,
+    req_path: FullPath,
+    params: HashMap<String, String>,
     memory: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
@@ -219,16 +223,27 @@ async fn handle_get_task(
 
     match &*memory {
         node::NodeState::Joined(node) => {
-            let storage_key: StorageKey = req_path.split('/').last().unwrap_or_default().to_string().parse().unwrap();
+            let storage_key: StorageKey = store_key.parse().unwrap();
             let storage_key_string = storage_key.to_string();
+
+            let query_with_q = params.iter().fold("".to_string(), |acc, (k, v)| {
+                if acc.is_empty() {
+                    format!("?{}={}", k, v)
+                } else {
+                    format!("{}&{}={}", acc, k, v)
+                }
+            });
+
             let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
                 &storage_key_string,
-                format!("items/{}", &storage_key_string).as_str(),
+                format!("{}{}", req_path.as_str(), query_with_q).as_str(),
                 ProxyMethod::Get,
                 None,
             )
             .await;
+
+            let limit = params.get("limit").map(|v| v.parse::<usize>().unwrap_or(10)).unwrap_or(10);
 
             if let Ok(Some(valid_routed_response)) = routed_response {
                 Ok(warp::reply::json(&valid_routed_response))
@@ -241,7 +256,7 @@ async fn handle_get_task(
             } else {
                 let store_ref = env.get_store().read().await;
 
-                let item_entries = match node.get_items(10, &storage_key, &store_ref).await {
+                let item_entries = match node.get_items(limit, &storage_key, &store_ref).await {
                     Ok(item_entry) => item_entry,
                     Err(e) => {
                         let response = ItemOpsResponseEnvelope {
@@ -279,9 +294,8 @@ async fn handle_get_task(
     }
 }
 
-async fn handle_get_tasks_count(
+async fn handle_get_item_count(
     memory: Arc<RwLock<NodeState>>,
-    env: Arc<Env>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let memory = memory.read().await;
 
@@ -308,8 +322,9 @@ async fn handle_get_tasks_count(
     }
 }
 
-async fn handle_remove_task(
-    req_path: String,
+async fn handle_remove_item(
+    store_key: String,
+    req_path: FullPath,
     socket: Arc<UdpSocket>,
     memory: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
@@ -318,12 +333,12 @@ async fn handle_remove_task(
 
     match &mut *memory {
         node::NodeState::Joined(node) => {
-            let storage_key: StorageKey = req_path.split('/').last().unwrap_or_default().parse().unwrap();
+            let storage_key: StorageKey = store_key.parse().unwrap();
             let storage_key_string = storage_key.to_string();
             let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
                 &storage_key_string,
-                format!("items/{}", &storage_key_string).as_str(),
+                req_path.as_str(),
                 ProxyMethod::Delete,
                 None,
             )
@@ -387,108 +402,6 @@ async fn handle_remove_task(
     }
 }
 
-async fn handle_update_task(
-    item: ItemCreateUpdate,
-    req_path: String,
-    memory: Arc<RwLock<NodeState>>,
-    env: Arc<Env>,
-) -> Result<impl warp::Reply, warp::Rejection> {
-    let storage_key: StorageKey  = req_path.split('/').last().unwrap_or_default().parse().unwrap();
-    let storage_key_string = storage_key.to_string();
-    let mut memory = memory.write().await;
-
-    match &mut *memory {
-        node::NodeState::Joined(node) => {
-            let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
-                node,
-                &storage_key_string,
-                format!("items/{}", &storage_key_string).as_str(),
-                ProxyMethod::Put,
-                Some(&item),
-            )
-            .await;
-
-            match routed_response {
-                Ok(Some(valid_routed_response)) => Ok(warp::reply::json(&valid_routed_response)),
-                Ok(None) => {
-                    info!("Routing to this node");
-                    let response: ItemOpsResponseEnvelope;
-
-                    let maybe_item = match node.get_item(&storage_key, &env.get_store().read().await).await {
-                        Ok(item) => item,
-                        Err(e) => {
-                            let response = ItemOpsResponseEnvelope {
-                                success: None,
-                                error: Some(format!("Item retrieval error: {}", e)),
-                            };
-                            return Ok(warp::reply::json(&response));
-                        }
-                    };
-
-                    if maybe_item.is_some()
-                    {
-                        let new_item_entry = ItemEntry {
-                            storage_key: storage_key.clone(),
-                            item: Item {
-                                message: item.message.as_bytes().to_vec(),
-                                status: ItemStatus::Active,
-                                hlc: HLC {
-                                    timestamp: now_millis(),
-                                    counter: 0,
-                                },
-                            }
-                        };
-
-                        let node_address = node.get_address().clone();
-                        match node.add_items(
-                            &vec![new_item_entry.clone()],
-                            &node_address,
-                            env.get_store().write().await,
-                        )
-                        .await {
-                            Ok(_) => (),
-                            Err(e) => {
-                                let response = ItemOpsResponseEnvelope {
-                                    success: None,
-                                    error: Some(format!("Item update error: {}", e)),
-                                };
-                                return Ok(warp::reply::json(&response));
-                            }
-                        }
-
-                        response = ItemOpsResponseEnvelope {
-                            success: Some(
-                                vec![new_item_entry]
-                            ),
-                            error: None,
-                        };
-                    } else {
-                        response = ItemOpsResponseEnvelope {
-                            success: None,
-                            error: Some(format!("Item not found: {}", &storage_key_string)),
-                        };
-                    }
-                    Ok(warp::reply::json(&response))
-                }
-                Err(err) => {
-                    let response = ItemOpsResponseEnvelope {
-                        success: None,
-                        error: Some(format!("Routing error: {}", &err)),
-                    };
-                    Ok(warp::reply::json(&response))
-                }
-            }
-        }
-        _ => {
-            let response = ItemOpsResponseEnvelope {
-                success: None,
-                error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
-            };
-            Ok(warp::reply::json(&response))
-        }
-    }
-}
-
 pub async fn web_server(
     local_web_addr: String,
     socket: Arc<UdpSocket>,
@@ -497,51 +410,42 @@ pub async fn web_server(
 ) {
     let post_item = warp::path!("items")
         .and(warp::post())
+        .and(warp::path::full())
         .and(warp::body::json())
         .and(with_socket(socket.clone()))
         .and(with_memory(memory.clone()))
         .and(with_env(env.clone()))
-        .and_then(handle_post_task);
+        .and_then(handle_post_item);
 
     let get_items_count = warp::path!("items")
         .and(warp::get())
         .and(with_memory(memory.clone()))
-        .and(with_env(env.clone()))
-        .and_then(handle_get_tasks_count);
+        .and_then(handle_get_item_count);
 
-    let get_item = warp::path!("items" / String)
+    let get_items = warp::path!("items" / String)
         .and(warp::get())
+        .and(warp::path::full())
+        .and(warp::query::<HashMap<String, String>>())
         .and(with_memory(memory.clone()))
         .and(with_env(env.clone()))
-        .and_then(handle_get_task);
+        .and_then(handle_get_items);
 
     let remove_item = warp::path!("items" / String)
         .and(warp::delete())
+        .and(warp::path::full())
         .and(with_socket(socket.clone()))
         .and(with_memory(memory.clone()))
         .and(with_env(env.clone()))
-        .and_then(handle_remove_task);
-
-    let update_item = warp::path!("items" / String)
-        .and(warp::put())
-        .and(with_memory(memory.clone()))
-        .and(warp::body::json())
-        .and(with_env(env.clone()))
-        .and_then(
-            |req_path: String, memory: Arc<RwLock<NodeState>>, item: ItemCreateUpdate, env: Arc<Env>| {
-                handle_update_task(item, req_path, memory, env)
-            },
-        );
+        .and_then(handle_remove_item);
 
     let address = local_web_addr
         .parse::<SocketAddr>()
         .expect("Failed to parse address for web server");
     warp::serve(
         post_item
-            .or(get_item)
+            .or(get_items)
             .or(get_items_count)
             .or(remove_item)
-            .or(update_item),
     )
     .run(address)
     .await;

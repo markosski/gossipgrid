@@ -6,10 +6,8 @@ use gossipgrid::{
 mod helpers;
 
 #[tokio::test]
-async fn test_publish_and_retrieve_item() {
-    env_logger::init();
-
-    log::info!("Starting test_publish_and_retrieve_item");
+async fn test_publish_and_retrieve_items() {
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
@@ -64,9 +62,7 @@ async fn test_publish_and_retrieve_item() {
 
 #[tokio::test]
 async fn test_publish_and_retrieve_many_item() {
-    env_logger::init();
-
-    log::info!("Starting test_publish_and_retrieve_item");
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
@@ -87,6 +83,7 @@ async fn test_publish_and_retrieve_many_item() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
+    // Get several itmes
     let res = client
         .get("http://localhost:3002/items/123?limit=10")
         .send()
@@ -100,12 +97,26 @@ async fn test_publish_and_retrieve_many_item() {
 
     assert!(items.len() == 2);
 
+    // Get items limited to 1
+    let res = client
+        .get("http://localhost:3002/items/123?limit=1")
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+
+    let response: ItemOpsResponseEnvelope =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let items = response.success.unwrap();
+
+    assert!(items.len() == 1);
+
     helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }
 
 #[tokio::test]
 async fn test_publish_and_delete_item() {
-    env_logger::init();
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
@@ -170,8 +181,8 @@ async fn test_publish_and_delete_item() {
 }
 
 #[tokio::test]
-async fn test_publish_and_update_item() {
-    env_logger::init();
+async fn test_publish_and_upsert_item() {
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 

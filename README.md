@@ -50,7 +50,11 @@ cargo test --lib
 ### Run specific test
 
 ```bash
-cargo test --package gossipgrid --test int_test test_publish_and_retrieve_item -- --exact --nocapture
+cargo test --package gossipgrid --test int_test test_publish_and_retrieve_item -- --nocapture
+
+# or
+
+cargo test --package gossipgrid --test int_test -- --test-threads=1 --nocapture
 ```
 
 ## CLI
