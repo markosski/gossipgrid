@@ -2,16 +2,17 @@ use std::collections::HashMap;
 
 use log::info;
 
-use crate::partition::VNode;
+use crate::partition::{PartitionId};
 
 // Add this import or definition for ItemId
-use crate::item::{self, ItemEntry, ItemId};
+use crate::item::{self, Item, ItemEntry, ItemStatus};
+use crate::store::{DataStoreError, StorageKey};
 
 use super::Store; // or define: type ItemId = String;
 
 pub struct InMemoryStore {
-    item_partitions: HashMap<VNode, HashMap<ItemId, ItemEntry>>,
-    items_delta: HashMap<ItemId, ItemEntry>,
+    item_partitions: HashMap<PartitionId, HashMap<StorageKey, Item>>,
+    items_delta: HashMap<StorageKey, Item>,
 }
 
 impl InMemoryStore {
@@ -25,57 +26,95 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, vnode: &VNode, key: &str) -> Option<&ItemEntry> {
-        let vnode_partition = self.item_partitions.get(vnode);
-        if let Some(partition) = vnode_partition {
-            partition.get(key)
+    async fn get(&self, partition_id: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
+        let maybe_partition = self.item_partitions.get(&partition_id);
+        if let Some(partition) = maybe_partition {
+            let item_entry = partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone()));
+            if let Some(item) = item_entry && item.item.status == ItemStatus::Active {
+                if item.item.status == ItemStatus::Active {
+                    Ok(Some(item))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                Ok(None)
+            }
         } else {
-            None
+            Ok(None)
         }
     }
 
-    async fn add(&mut self, vnode: &VNode, key: String, value: ItemEntry) {
-        let vnode_partition = self.item_partitions.get_mut(vnode);
+    async fn get_many(&self, partition_id: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+        let maybe_partition = self.item_partitions.get(&partition_id);
+        let mut data: Vec<ItemEntry> = vec!();
+        let mut counter = 0;
+        if let Some(partition) = maybe_partition {
+            for (storage_key, item) in partition.iter() {
+                if counter == limit {
+                    break;
+                }
+
+                if item.status == ItemStatus::Active && storage_key.partition_key == key.partition_key {
+                    if let (Some(range_key), Some(key_range_key)) = (&storage_key.range_key, &key.range_key) 
+                    && range_key.value().contains(key_range_key.value()) {
+                        data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
+                        counter += 1;
+                    } else if key.range_key.is_none() {
+                        data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
+                        counter += 1;
+                    }
+                }
+            }
+        }
+        Ok(data)
+    }
+
+    async fn insert(&mut self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {
+        let maybe_partition = self.item_partitions.get_mut(&partition);
         info!(
-            "Adding item to vnode: {:?}, key: {}, value: {:?}",
-            vnode, key, value
+            "Adding item to partition: {:?}, key: {}, value: {:?}",
+            partition, key.to_string(), value
         );
 
-        if let Some(partition) = vnode_partition {
+        if let Some(partition) = maybe_partition {
             partition.insert(key.clone(), value.clone());
-            self.items_delta.insert(key, value);
+            self.items_delta.insert(key.clone(), value);
         } else {
             let mut new_partition = HashMap::new();
             new_partition.insert(key.clone(), value.clone());
-            self.item_partitions.insert(*vnode, new_partition);
-            self.items_delta.insert(key, value);
+            self.item_partitions.insert(*partition, new_partition);
+            self.items_delta.insert(key.clone(), value);
         }
+        Ok(())
     }
 
-    async fn remove(&mut self, vnode: &VNode, key: &str) {
-        info!("Removing item from vnode: {:?}, key: {}", vnode, key);
+    async fn remove(&mut self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError> {
+        info!("Removing item from partition: {:?}, key: {}", partition, key.to_string());
 
-        let vnode_partition = self.item_partitions.get_mut(vnode);
-        if let Some(partition) = vnode_partition {
+        let maybe_partition = self.item_partitions.get_mut(&partition);
+        if let Some(partition) = maybe_partition {
             partition.remove(key);
         }
+        Ok(())
     }
 
-    async fn get_all_delta(&self) -> Vec<ItemEntry> {
-        self.items_delta.values().cloned().collect()
+    async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError> {
+        Ok(self.items_delta.iter().map(|(k, v)| ItemEntry::new(k.clone(), v.clone())).collect())
     }
 
-    async fn clear_all_delta(&mut self) {
+    async fn clear_all_delta(&mut self) -> Result<(), DataStoreError> {
         self.items_delta.clear();
+        Ok(())
     }
 
-    async fn remove_delta_item(&mut self, key: &str) {
+    async fn remove_from_delta(&mut self, key: &StorageKey) -> Result<(), DataStoreError> {
         self.items_delta.remove(key);
+        Ok(())
     }
 
-    async fn partition_counts(&self) -> HashMap<VNode, usize> {
+    async fn partition_counts(&self) -> Result<HashMap<PartitionId, usize>, DataStoreError> {
         let mut counts = HashMap::new();
-        for (vnode, items) in &self.item_partitions {
+        for (partition, items) in &self.item_partitions {
             let mut counter = 0;
             for item in items.values() {
                 match item.status {
@@ -85,81 +124,128 @@ impl Store for InMemoryStore {
                     }
                 }
             }
-            counts.insert(*vnode, counter);
+            counts.insert(*partition, counter);
         }
-        counts
+        Ok(counts)
     }
 
-    async fn delta_count(&self) -> usize {
-        return self.items_delta.values().len();
+    async fn delta_count(&self) -> Result<usize, DataStoreError> {
+        Ok(self.items_delta.values().len())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        gossip::HLC,
-        item::{Item, ItemStatus},
+        gossip::HLC, item::{Item, ItemStatus}, partition::PartitionMap, store::{PartitionKey, RangeKey}
     };
+
+    #[tokio::test]
+    async fn test_insert_item_pk_only() {
+        use super::*;
+        let mut store = InMemoryStore::new();
+        let partition_map = PartitionMap::new(&10, &2);
+
+        let storage_key = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
+        let partition = partition_map.hash_key(&storage_key.to_string());
+
+        let _ = store
+            .insert(
+                &partition,
+                &storage_key,
+                Item {
+                    message: "test".as_bytes().to_vec(),
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let retrieved_item = store.get(&partition, &storage_key).await.unwrap();
+        assert!(retrieved_item.is_some());
+        let item_entry = retrieved_item.unwrap();
+        assert_eq!(item_entry.storage_key, storage_key);
+        assert_eq!(item_entry.item.message, "test".as_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_insert_item_pk_and_rk() {
+        use super::*;
+        let mut store = InMemoryStore::new();
+        let partition_map = PartitionMap::new(&10, &2);
+
+        let storage_key = StorageKey { partition_key: PartitionKey("123".to_string()), range_key: Some(RangeKey("456".to_string())) };
+        let partition = partition_map.hash_key(&storage_key.partition_key.value());
+
+        let _ = store
+            .insert(
+                &partition,
+                &storage_key,
+                Item {
+                    message: "test".as_bytes().to_vec(),
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let retrieved_item = store.get(&partition, &storage_key).await.unwrap();
+        assert!(retrieved_item.is_some());
+        let item_entry = retrieved_item.unwrap();
+        assert_eq!(item_entry.storage_key, storage_key);
+        assert_eq!(item_entry.item.message, "test".as_bytes().to_vec());
+    }
 
     #[tokio::test]
     async fn test_partition_counts() {
         use super::*;
         let mut store = InMemoryStore::new();
 
-        let vnode1 = 1;
-        let vnode2 = 2;
+        let partition1 = PartitionId(1);
+        let partition2 = PartitionId(2);
 
-        store
-            .add(
-                &vnode1,
-                "item1".to_string(),
-                ItemEntry {
-                    item: Item {
-                        id: "item1".to_string(),
-                        message: "test1".to_string(),
-                        submitted_at: 0,
-                    },
+        let storage_key1 = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
+        let storage_key2 = StorageKey { partition_key: PartitionKey("item2".to_string()), range_key: None };
+        let storage_key3 = StorageKey { partition_key: PartitionKey("item3".to_string()), range_key: None };
+
+        let _ = store
+            .insert(
+                &partition1,
+                &storage_key1,
+                Item {
+                    message: "test1".as_bytes().to_vec(),
                     status: ItemStatus::Active,
                     hlc: HLC::new(),
                 },
             )
             .await;
 
-        store
-            .add(
-                &vnode1,
-                "item2".to_string(),
-                ItemEntry {
-                    item: Item {
-                        id: "item2".to_string(),
-                        message: "test2".to_string(),
-                        submitted_at: 0,
-                    },
+        let _ = store
+            .insert(
+                &partition1,
+                &storage_key2,
+                Item {
+                        message: "test2".as_bytes().to_vec(),
+                        status: ItemStatus::Active,
+                        hlc: HLC::new(),
+                },
+            )
+            .await;
+
+        let _ = store
+            .insert(
+                &partition2,
+                &storage_key3,
+                Item {
+                    message: "test3".as_bytes().to_vec(),
                     status: ItemStatus::Active,
                     hlc: HLC::new(),
                 },
             )
             .await;
 
-        store
-            .add(
-                &vnode2,
-                "item3".to_string(),
-                ItemEntry {
-                    item: Item {
-                        id: "item3".to_string(),
-                        message: "test3".to_string(),
-                        submitted_at: 0,
-                    },
-                    status: ItemStatus::Active,
-                    hlc: HLC::new(),
-                },
-            )
-            .await;
-
-        let counts = store.partition_counts().await;
-        assert_eq!(counts.get(&vnode1), Some(&2));
-        assert_eq!(counts.get(&vnode2), Some(&1));
+        let counts = store.partition_counts().await.unwrap();
+        assert_eq!(counts.get(&partition1), Some(&2));
+        assert_eq!(counts.get(&partition2), Some(&1));
     }
 }

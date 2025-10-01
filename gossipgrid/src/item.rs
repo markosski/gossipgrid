@@ -1,54 +1,53 @@
-use crate::gossip::HLC;
-use crate::now_millis;
+use crate::{gossip::HLC, store::StorageKey};
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-pub type ItemId = String;
 
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct Item {
-    pub id: ItemId,
-    pub message: String, // Example metadata
-    pub submitted_at: u64,
-}
-
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
-pub struct ItemEntry {
-    pub item: Item,
+    pub message: Vec<u8>,
     pub status: ItemStatus,
     pub hlc: HLC,
 }
 
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+pub struct ItemEntry {
+    pub storage_key: StorageKey,
+    pub item: Item
+}
+
 impl ItemEntry {
-    pub fn new(item: Item) -> ItemEntry {
+    pub fn new(storage_key: StorageKey, item: Item) -> ItemEntry {
         ItemEntry {
-            item: item,
-            status: ItemStatus::Active,
-            hlc: HLC::new().tick_hlc(now_millis()),
+            storage_key,
+            item
         }
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub enum ItemStatus {
     Active,
     Tombstone(u64),
 }
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
-pub struct ItemSubmit {
-    pub id: ItemId,
-    pub message: String,
-}
+#[cfg(test)]
+mod tests {
+    use crate::store::{PartitionKey, RangeKey};
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
-pub struct ItemUpdate {
-    pub message: String,
-}
+    use super::*;
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ItemSubmitResponse {
-    pub success: Option<HashMap<String, String>>,
-    pub error: Option<String>,
+    #[test]
+    fn test_storage_key_equality() {
+        let pk1 = PartitionKey("partition1".to_string());
+        let rk1 = RangeKey("range1".to_string());
+        let key1 = StorageKey::new(pk1.clone(), Some(rk1.clone()));
+        let key2 = StorageKey::new(pk1.clone(), Some(rk1.clone()));
+        let key3 = StorageKey::new(pk1.clone(), None);
+
+        // Keys with same partition and range should be equal
+        assert_eq!(key1, key2);
+
+        // Keys with same partition but different range should not be equal
+        assert_ne!(key1, key3);
+    }
 }

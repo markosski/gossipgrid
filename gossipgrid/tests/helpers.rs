@@ -1,4 +1,4 @@
-use gossipgrid::node::ClusterConfig;
+use gossipgrid::node::{ClusterConfig, NodeError};
 use gossipgrid::{
     env::{self, Env},
     node::{self, NodeState},
@@ -8,7 +8,7 @@ use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub async fn stop_nodes(handles: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>) {
+pub async fn stop_nodes(handles: Vec<tokio::task::JoinHandle<Result<(), NodeError>>>) {
     for handle in handles {
         handle.abort();
     }
@@ -18,7 +18,7 @@ pub async fn start_test_cluster(
     partition_count: u16,
     replication_factor: u8,
 ) -> Vec<(
-    tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+    tokio::task::JoinHandle<Result<(), NodeError>>,
     Arc<RwLock<NodeState>>,
 )> {
     let local_addr = "127.0.0.1:4009".to_string();

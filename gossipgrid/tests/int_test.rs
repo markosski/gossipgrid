@@ -1,22 +1,31 @@
 use gossipgrid::{
-    item::ItemSubmitResponse,
     node::{NodeState},
+};
+
+use gossipgrid::web::{
+    ItemOpsResponseEnvelope
 };
 
 mod helpers;
 
 #[tokio::test]
-async fn test_publish_and_retrieve_item() {
-    env_logger::init();
-
-    log::info!("Starting test_publish_and_retrieve_item");
+async fn test_publish_and_retrieve_items() {
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
     let _ = client
         .post("http://localhost:3001/items")
-        .body(r#"{"id": "123", "message": "foo1"}"#)
+        .body(r#"{"partition_key": "123", "range_key": "456", "message": "foo1"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Submitting another item to ensure we are fetching the correct one
+    let _ = client
+        .post("http://localhost:3001/items")
+        .body(r#"{"partition_key": "123", "range_key": "457", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
@@ -24,16 +33,20 @@ async fn test_publish_and_retrieve_item() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let res = client
-        .get("http://localhost:3002/items/123")
+        .get("http://localhost:3002/items/123_456")
         .send()
         .await
         .unwrap();
+    assert!(res.status().is_success());
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
 
-    assert!(id.contains("123"));
+    let item_count = response.success.as_ref().unwrap().len().clone();
+    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
+
+    assert!(item_count == 1);
+    assert!(item_msg.contains("foo1"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -44,22 +57,76 @@ async fn test_publish_and_retrieve_item() {
     };
 
     let count = node.items_count();
-    assert_eq!(count, 1);
+    assert_eq!(count, 2);
     drop(node_guard);
 
     helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
 }
 
 #[tokio::test]
-async fn test_publish_and_delete_item() {
-    env_logger::init();
+async fn test_publish_and_retrieve_many_item() {
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
     let _ = client
         .post("http://localhost:3001/items")
-        .body(r#"{"id": "123", "message": "foo1"}"#)
+        .body(r#"{"partition_key": "123", "range_key": "456", "message": "foo1"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client
+        .post("http://localhost:3002/items")
+        .body(r#"{"partition_key": "123", "range_key": "457", "message": "foo2"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Get several itmes
+    let res = client
+        .get("http://localhost:3002/items/123?limit=10")
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+
+    let response: ItemOpsResponseEnvelope =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let items = response.success.unwrap();
+
+    assert!(items.len() == 2);
+
+    // Get items limited to 1
+    let res = client
+        .get("http://localhost:3002/items/123?limit=1")
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+
+    let response: ItemOpsResponseEnvelope =
+        serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
+    let items = response.success.unwrap();
+
+    assert!(items.len() == 1);
+
+    helpers::stop_nodes(nodes.into_iter().map(|n| n.0).collect()).await;
+}
+
+#[tokio::test]
+async fn test_publish_and_delete_item() {
+    let _ = env_logger::try_init();
+
+    let nodes = helpers::start_test_cluster(3, 3).await;
+
+    let client = reqwest::Client::new();
+    let _ = client
+        .post("http://localhost:3001/items")
+        .body(r#"{"partition_key": "123", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
@@ -73,11 +140,11 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
 
-    assert!(id.contains("123"));
+    assert!(item_msg.contains("foo1"));
 
     // verify item is deleted
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -97,10 +164,10 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
-    assert!(response.error.unwrap().contains("Item not found"));
+    assert!(response.error.unwrap().contains("No items found"));
 
     // verify cluster item count
     let node_guard = nodes[2].1.read().await;
@@ -117,15 +184,15 @@ async fn test_publish_and_delete_item() {
 }
 
 #[tokio::test]
-async fn test_publish_and_update_item() {
-    env_logger::init();
+async fn test_publish_and_upsert_item() {
+    let _ = env_logger::try_init();
 
     let nodes = helpers::start_test_cluster(3, 3).await;
 
     let client = reqwest::Client::new();
     let _ = client
         .post("http://localhost:3001/items")
-        .body(r#"{"id": "123", "message": "foo1"}"#)
+        .body(r#"{"partition_key": "123", "message": "foo1"}"#)
         .send()
         .await
         .unwrap();
@@ -138,17 +205,17 @@ async fn test_publish_and_update_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
 
-    assert!(id.contains("123"));
+    assert!(item_msg.contains("foo1"));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let _ = client
         .post("http://localhost:3002/items")
-        .body(r#"{"id": "123", "message": "foo2"}"#)
+        .body(r#"{"partition_key": "123", "message": "foo2"}"#)
         .send()
         .await
         .unwrap();
@@ -161,11 +228,12 @@ async fn test_publish_and_update_item() {
         .await
         .unwrap();
 
-    let response: ItemSubmitResponse =
+    let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let id = response.success.unwrap().get("item").unwrap().to_string();
+    let item_resp = response.success.unwrap().get(0).unwrap().clone();
+    let message = item_resp.message_string().unwrap();
 
-    assert!(id.contains("foo2"));
+    assert!(message.contains("foo2"));
 
     // verify node received ack and updated its delta state
     // none of the nodes should have the item

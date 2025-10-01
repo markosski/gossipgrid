@@ -2,7 +2,7 @@ use crate::env::Env;
 use crate::item::ItemEntry;
 use crate::node::{self, ClusterConfig, DeltaAckState, JoinedNode, Node, NodeState, PreJoinNode};
 use crate::now_millis;
-use crate::partition::{PartitionMap, VNode};
+use crate::partition::{PartitionMap, PartitionId};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ pub struct GossipJoinMessage {
 pub struct GossipMessage {
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
-    pub partition_item_counts: HashMap<VNode, usize>,
+    pub partition_item_counts: HashMap<PartitionId, usize>,
     pub all_peers: HashMap<String, Node>,
     pub node_hlc: HLC,
     pub items_delta: Vec<ItemEntry>,
@@ -217,7 +217,7 @@ pub async fn send_gossip_ack(
             address_to: peer_addr.clone(),
             message_type: "GossipAckSent".to_string(),
             data: serde_json::json!({
-                "item_ids": items.iter().map(|e| e.item.id.clone()).collect::<Vec<_>>(),
+                "item_ids": items.iter().map(|x| x.storage_key.to_string()).collect::<Vec<_>>(),
             }),
             timestamp: now_millis(),
         })
@@ -338,7 +338,7 @@ async fn handle_main_message(
         message_type: "GossipReceived".to_string(),
         data: serde_json::json!({
             "delta_size": message.items_delta.len(),
-            "item_ids": message.items_delta.iter().map(|e| e.item.id.clone()).collect::<Vec<_>>(),
+            "item_ids": message.items_delta.iter().map(|e| e.storage_key.to_string()).collect::<Vec<_>>(),
             "sync_request": message.sync_request.is_sync_request,
             "sync_response": message.sync_response,
         }),
@@ -350,13 +350,24 @@ async fn handle_main_message(
         node::NodeState::PreJoin(node) => {
             node.node_hlc = HLC::merge(&node.node_hlc, &message.node_hlc, now_millis());
 
-            let mut joined_node = node
+            let mut joined_node = match node
                 .to_joined_state(
                     message.cluster_config.clone(),
                     message.partition_map.clone(),
                     env.get_store().read().await,
                 )
-                .await;
+                .await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!(
+                            "node={}; Failed to transition to Joined state due to error: {}",
+                            node.get_address(),
+                            e.to_string()
+                        );
+                        return;
+                    }
+                };
+
             let address = joined_node.address.clone();
             let cluster_size = joined_node.cluster_config.cluster_size.clone();
             let all_peers = message.all_peers.clone();
@@ -478,41 +489,58 @@ async fn handle_main_message(
             }
 
             // Data sync
-            if message.sync_request.is_sync_request && node.cluster_size() > 1 {
-                info!("node={}; Syncing back to {}", node.get_address(), &src);
-                let mut items: Vec<ItemEntry> = vec![];
+            // if message.sync_request.is_sync_request && node.cluster_size() > 1 {
+            //     info!("node={}; Syncing back to {}", node.get_address(), &src);
+            //     let mut items: Vec<ItemEntry> = vec![];
 
-                if let Some(src_node) = node.all_peers.get(&src.to_string()) {
-                    let last_seen_hlc = HLC::new().tick_hlc(src_node.last_seen.clone());
-                    let store_guard = env.get_store().read().await;
-                    for entry in node.items_since(&last_seen_hlc, &store_guard).await {
-                        if let Some(e) = node.get_item(&entry.item.id, &store_guard).await {
-                            items.push(e.clone());
-                        }
-                    }
-                    info!(
-                        "node={}; Sync identifier {} items to send since {}",
-                        node.get_address(),
-                        &items.len(),
-                        src_node.last_seen
-                    );
-                } else {
-                    error!(
-                        "node={}; Cannot find source node in peers list",
-                        &node.get_address()
-                    );
-                    return;
-                }
+            //     if let Some(src_node) = node.all_peers.get(&src.to_string()) {
+            //         let last_seen_hlc = HLC::new().tick_hlc(src_node.last_seen.clone());
+            //         let store_guard = env.get_store().read().await;
 
-                send_gossip_single(
-                    Some(&src.to_string()),
-                    socket.clone(),
-                    node,
-                    false,
-                    env.clone(),
-                )
-                .await;
-            }
+            //         let items_since = match node.items_since(&last_seen_hlc, &store_guard).await {
+            //             Ok(items) => items,
+            //             Err(e) => {
+            //                 error!("node={}; Failed to get items since {:?}: {}", node.get_address(), &last_seen_hlc, e.to_string());
+            //                 vec![]
+            //             }
+            //         };
+
+            //         for entry in items_since {
+            //             let maybe_item = match node.get_item(&entry.item.id, &store_guard).await {
+            //                 Ok(i) => i,
+            //                 Err(e) => {
+            //                     error!("node={}; Failed to get item {}: {}", node.get_address(), &entry.item.id, e.to_string());
+            //                     continue;
+            //                 }
+            //             };
+
+            //             if let Some(e) = maybe_item {
+            //                 items.push(e.clone());
+            //             }
+            //         }
+            //         info!(
+            //             "node={}; Sync identifier {} items to send since {}",
+            //             node.get_address(),
+            //             &items.len(),
+            //             src_node.last_seen
+            //         );
+            //     } else {
+            //         error!(
+            //             "node={}; Cannot find source node in peers list",
+            //             &node.get_address()
+            //         );
+            //         return;
+            //     }
+
+            //     send_gossip_single(
+            //         Some(&src.to_string()),
+            //         socket.clone(),
+            //         node,
+            //         false,
+            //         env.clone(),
+            //     )
+            //     .await;
+            // }
 
             // bump last update time, it is important this happens after the sync
             node.all_peers.entry(src.to_string()).and_modify(|node| {
@@ -557,7 +585,7 @@ async fn handle_item_delta_message(
                 address_to: node.get_address().clone(),
                 message_type: "GossipAckReceived".to_string(),
                 data: serde_json::json!({
-                    "item_ids": message.items_received.iter().map(|e| e.item.id.clone()).collect::<Vec<_>>(),
+                    "item_ids": message.items_received.iter().map(|e| e.storage_key.to_string()).collect::<Vec<_>>(),
                 }),
                 timestamp: now_millis(),
             }).await;
@@ -565,7 +593,8 @@ async fn handle_item_delta_message(
             // Update partition counts
             node.update_partition_counts(&node_id, HashMap::new());
 
-            node.reconcile_delta_state(
+            // TODO: ensure error here is properly handled
+            let _ = node.reconcile_delta_state(
                 &src.to_string(),
                 &message.items_received,
                 &mut env.get_store().write().await,
@@ -672,9 +701,9 @@ pub async fn send_gossip_on_interval(
                     &this_node.items_delta_state.len()
                 );
                 info!(
-                    "node={}; Vnodes: {:?}",
+                    "node={}; Partition: {:?}",
                     &node_address,
-                    &this_node.partition_map.get_vnodes_for_node(&local_addr)
+                    &this_node.partition_map.get_partitions_for_node(&local_addr)
                 );
                 info!(
                     "node={}; PartitionMap: {:?}",
@@ -789,7 +818,18 @@ async fn send_gossip_to_peers(
     {
         let store_guard = env.get_store().read().await;
         for peer_dest in next_nodes.iter() {
-            let items_delta = node_state.get_delta_for_node(peer_dest, &store_guard).await;
+            let items_delta = match node_state.get_delta_for_node(peer_dest, &store_guard).await {
+                Ok(delta) => delta,
+                Err(e) => {
+                    error!(
+                        "node={}; Error getting deltas for node {}",
+                        node_state.get_address(),
+                        e
+                    );
+                    vec![]
+                }
+            };
+
             all_delta_count += items_delta.len();
             peer_deltas.push((peer_dest.clone(), items_delta));
         }
@@ -806,10 +846,12 @@ async fn send_gossip_to_peers(
 
         let store_guard = env.get_store().read().await;
 
+        let partition_counts = store_guard.partition_counts().await.unwrap_or(HashMap::new());
+
         let msg = GossipMessage {
             cluster_config: node_state.cluster_config.clone(),
             partition_map: node_state.partition_map.clone(),
-            partition_item_counts: store_guard.partition_counts().await,
+            partition_item_counts: partition_counts,
             all_peers: node_state.all_peers.clone(),
             node_hlc: node_hlc.clone(),
             items_delta: items_delta.clone(),
@@ -853,7 +895,8 @@ async fn send_gossip_to_peers(
 
             // Remove delta items if everyone we know has received them
             if all_delta_count == 0 && !next_nodes.is_empty() {
-                node_state
+                // TODO: ensure error here is properly handled
+                let _ = node_state
                     .clear_delta(&mut env.get_store().write().await)
                     .await;
             }
@@ -868,7 +911,7 @@ async fn send_gossip_to_peers(
                 message_type: "GossipSent".to_string(),
                 data: serde_json::json!({
                     "delta_size": items_delta.len(),
-                    "item_ids": items_delta.iter().map(|e| e.item.id.clone()).collect::<Vec<_>>(),
+                    "item_ids": items_delta.iter().map(|e| e.storage_key.to_string()).collect::<Vec<_>>(),
                     "sync_request": sync_flag,
                     "sync_response": is_sync_response,
                 }),
