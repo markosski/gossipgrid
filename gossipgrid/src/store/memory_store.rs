@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use log::info;
 use tokio::sync::RwLock;
 
+use crate::gossip::HLC;
 use crate::partition::{PartitionId};
 
 // Add this import or definition for ItemId
 use crate::item::{self, Item, ItemEntry, ItemStatus};
-use crate::store::{DataStoreError, StorageKey};
+use crate::store::{DataStoreError, StorageKey, Store};
 
-use super::Store; // or define: type ItemId = String;
 
 pub struct InMemoryStore {
     item_partitions: RwLock<HashMap<PartitionId, HashMap<StorageKey, Item>>>,
@@ -70,6 +70,10 @@ impl Store for InMemoryStore {
             }
         }
         Ok(data)
+    }
+
+    async fn get_from(&self, partition: &PartitionId, hlc: HLC, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+        Ok(vec![])
     }
 
     async fn insert(&self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {

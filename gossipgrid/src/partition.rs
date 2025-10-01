@@ -1,13 +1,15 @@
 use bincode::{Decode, Encode};
 use log::{error};
 use rand::RngCore;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::node::NodeId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode, Serialize, Deserialize)]
 pub struct PartitionId(pub u16);
 impl PartitionId {
     pub fn value(self) -> u16 {

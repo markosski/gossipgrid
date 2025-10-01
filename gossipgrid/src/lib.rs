@@ -8,6 +8,7 @@ pub mod item;
 pub mod node;
 pub mod partition;
 pub mod store;
+pub mod sync;
 pub mod web;
 
 pub fn now_millis() -> u64 {

@@ -6,7 +6,7 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{item::{Item, ItemEntry}, partition::PartitionId};
+use crate::{gossip::HLC, item::{Item, ItemEntry}, partition::PartitionId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode, Serialize, Deserialize)]
 pub struct PartitionKey(pub String);
@@ -70,6 +70,9 @@ pub trait Store: Send + Sync {
     /// Get many items by key and optional range_key
     /// If range_key is None, get all items with the given key up to the limit
     async fn get_many(&self, partition: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError>;
+
+    /// Get many items starting from HLC 
+    async fn get_from(&self, partition: &PartitionId, hlc: HLC, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError>;
 
     /// Insert item by key and range_key
     /// If an item with the same key and range_key exists, it should be updated

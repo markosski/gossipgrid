@@ -31,9 +31,15 @@ RECENTLY DONE
     * considerations for sort key / composite key, what order guarantees should we provide
 
 TODO
-* take a second look at the delta sync for proper implementation, currently sync flag is false 
+* delta sync
 * ensure when retrieving an item for VNODE we also check active Nodes 
-* node that is in sync mode should not be used for reads until changes state
 * cluster replicas don't seem to be evenly distributed
-* create a most robust mechanisms for syncing items when node re-joins
-    - ensure efficiency, micro batch mode with ack tracking and rejection of upstream updates
+
+
+-----
+## Sync
+
+* node joins in JOINED_SYNC mode to random node, node is able to receive updates and sends updates it receives through delta sync from other nodes
+* joining node is providing join datetime and maintains information (saving to local file) about the progress (most recent timestamp it had seen). With this information as node is receiving sync data the window of last seen and join date shrinks and eventally node declares it is caught up
+* only when node switches to JOINED only then can start receiving requests from clients through API
+
