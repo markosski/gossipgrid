@@ -1,25 +1,23 @@
-use tokio::sync::RwLock;
-
 use crate::{event::EventPublisher, store::Store};
 
 pub struct Env {
-    pub store: RwLock<Box<dyn Store>>,
-    pub event_publisher: RwLock<Box<dyn EventPublisher>>,
+    pub store: Box<dyn Store + Send + Sync>,
+    pub event_publisher: Box<dyn EventPublisher + Send + Sync>,
 }
 
 impl Env {
     pub fn new(store: Box<dyn Store>, event_publisher: Box<dyn EventPublisher>) -> Self {
         Env {
-            store: RwLock::new(store),
-            event_publisher: RwLock::new(event_publisher),
+            store: store,
+            event_publisher: event_publisher,
         }
     }
 
-    pub fn get_store(&self) -> &RwLock<Box<dyn Store>> {
-        &self.store
+    pub fn get_store(&self) -> &(dyn Store + Send + Sync) {
+        &*self.store
     }
 
-    pub fn get_event_publisher(&self) -> &RwLock<Box<dyn EventPublisher>> {
-        &self.event_publisher
+    pub fn get_event_publisher(&self) -> &(dyn EventPublisher + Send + Sync) {
+        &*self.event_publisher
     }
 }

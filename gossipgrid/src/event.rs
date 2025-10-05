@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tokio::fs::File;
+use tokio::{fs::File, sync::RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -12,12 +12,12 @@ pub struct Event {
 
 #[async_trait::async_trait]
 pub trait EventPublisher: Send + Sync {
-    async fn publish(&mut self, msg: &Event);
+    async fn publish(&self, msg: &Event);
 }
 
 pub struct EventPublisherFileLogger {
     pub file_path: String,
-    file: File,
+    file: RwLock<File>,
 }
 
 impl EventPublisherFileLogger {
@@ -35,19 +35,21 @@ impl EventPublisherFileLogger {
 
         EventPublisherFileLogger {
             file_path,
-            file: file,
+            file: RwLock::new(file),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl EventPublisher for EventPublisherFileLogger {
-    async fn publish(&mut self, msg: &Event) {
+    async fn publish(&self, msg: &Event) {
         use tokio::io::AsyncWriteExt;
 
         let msg_json = serde_json::to_string(msg).expect("Failed to serialize event");
 
-        if let Err(e) = self.file.write_all((msg_json + "\n").as_bytes()).await {
+        let mut file = self.file.write().await;
+
+        if let Err(e) = file.write_all((msg_json + "\n").as_bytes()).await {
             eprintln!("Failed to write to event log file: {}", e);
         }
     }

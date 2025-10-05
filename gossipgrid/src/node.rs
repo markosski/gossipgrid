@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, hash_map};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{Mutex, RwLock};
 
 const DELTA_STATE_EXPIRY: Duration = Duration::from_secs(60);
 
@@ -272,7 +272,7 @@ impl PreJoinNode {
         &mut self,
         cluster_config: ClusterConfig,
         partition_map: PartitionMap,
-        store: RwLockReadGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<JoinedNode, NodeError> {
         let counts = store.partition_counts().await.map_err(|e| {
             NodeError::ErrorJoiningNode(e.to_string())
@@ -383,7 +383,7 @@ impl JoinedNode {
         &mut self,
         entry: ItemEntry,
         from_node: &str,
-        store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<Option<Item>, NodeError> {
         let storage_key_string = entry.storage_key.to_string();
         let partition = self.partition_map.hash_key(&entry.storage_key.partition_key.value());
@@ -470,13 +470,12 @@ impl JoinedNode {
         &mut self,
         items: &[ItemEntry],
         from_node: &str,
-        store: RwLockWriteGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<Vec<Item>, NodeError> {
         let mut added_items = vec![];
-        let mut store_ref = store;
 
         for item in items {
-            let maybe_new_entry = self.add_item(item.clone(), from_node, &mut store_ref).await.map_err(|e| {
+            let maybe_new_entry = self.add_item(item.clone(), from_node, store).await.map_err(|e| {
                 NodeError::ItemOperationError(e.to_string())
             })?;
 
@@ -487,7 +486,7 @@ impl JoinedNode {
         let this_node = self.get_address().clone();
 
 
-        let partition_counts = match store_ref.partition_counts().await {
+        let partition_counts = match store.partition_counts().await {
             Ok(counts) => counts,
             Err(e) => {
                 error!("node={}; Failed to get partition counts: {}", this_node, e);
@@ -507,7 +506,7 @@ impl JoinedNode {
         &mut self,
         from_node: &str,
         ack_delta_items: &[ItemEntry],
-        store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<(), NodeError> {
         for ack_item in ack_delta_items {
             let storage_key_string = ack_item.storage_key.to_string();
@@ -583,7 +582,7 @@ impl JoinedNode {
         });
     }
 
-    pub async fn clear_delta(&mut self, store: &mut RwLockWriteGuard<'_, Box<dyn Store>>) -> Result<(), NodeError> {
+    pub async fn clear_delta(&mut self, store: &dyn Store) -> Result<(), NodeError> {
         store.clear_all_delta().await.map_err(|e| {
             NodeError::ItemOperationError(e.to_string())
         })?;
@@ -598,7 +597,7 @@ impl JoinedNode {
     pub async fn get_delta_for_node(
         &self,
         node: &NodeId,
-        store: &RwLockReadGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<Vec<ItemEntry>, NodeError> {
         let mut items = vec![];
 
@@ -623,7 +622,7 @@ impl JoinedNode {
         &mut self,
         storage_key: &StorageKey,
         from_node: &str,
-        store: &mut RwLockWriteGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<bool, NodeError> {
         let this_node = self.get_address().clone();
         let store_key_string = storage_key.to_string();
@@ -701,7 +700,7 @@ impl JoinedNode {
     pub async fn get_item(
         &self,
         store_key: &StorageKey,
-        store: &RwLockReadGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<Option<ItemEntry>, NodeError> {
         let partition = self.partition_map.hash_key(&store_key.partition_key.value());
         let maybe_item = store.get(&partition, store_key).await.map_err(|e| {
@@ -715,7 +714,7 @@ impl JoinedNode {
         &self,
         limit: usize,
         store_key: &StorageKey,
-        store: &RwLockReadGuard<'_, Box<dyn Store>>,
+        store: &dyn Store,
     ) -> Result<Vec<ItemEntry>, NodeError> {
         let partition = self.partition_map.hash_key(&store_key.partition_key.value());
         let maybe_item = store.get_many(&partition, store_key, limit).await.map_err(|e| {

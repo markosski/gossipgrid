@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use log::info;
+use tokio::sync::RwLock;
 
 use crate::partition::{PartitionId};
 
@@ -11,15 +12,15 @@ use crate::store::{DataStoreError, StorageKey};
 use super::Store; // or define: type ItemId = String;
 
 pub struct InMemoryStore {
-    item_partitions: HashMap<PartitionId, HashMap<StorageKey, Item>>,
-    items_delta: HashMap<StorageKey, Item>,
+    item_partitions: RwLock<HashMap<PartitionId, HashMap<StorageKey, Item>>>,
+    items_delta: RwLock<HashMap<StorageKey, Item>>,
 }
 
 impl InMemoryStore {
     pub fn new() -> Self {
         InMemoryStore {
-            item_partitions: HashMap::new(),
-            items_delta: HashMap::new(),
+            item_partitions: RwLock::new(HashMap::new()),
+            items_delta: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -27,7 +28,8 @@ impl InMemoryStore {
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
     async fn get(&self, partition_id: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
-        let maybe_partition = self.item_partitions.get(&partition_id);
+        let item_partitions = self.item_partitions.read().await;
+        let maybe_partition = item_partitions.get(&partition_id);
         if let Some(partition) = maybe_partition {
             let item_entry = partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone()));
             if let Some(item) = item_entry && item.item.status == ItemStatus::Active {
@@ -45,7 +47,8 @@ impl Store for InMemoryStore {
     }
 
     async fn get_many(&self, partition_id: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
-        let maybe_partition = self.item_partitions.get(&partition_id);
+        let item_partitions = self.item_partitions.read().await;
+        let maybe_partition = item_partitions.get(&partition_id);
         let mut data: Vec<ItemEntry> = vec!();
         let mut counter = 0;
         if let Some(partition) = maybe_partition {
@@ -69,29 +72,32 @@ impl Store for InMemoryStore {
         Ok(data)
     }
 
-    async fn insert(&mut self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {
-        let maybe_partition = self.item_partitions.get_mut(&partition);
+    async fn insert(&self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {
+        let mut item_partitions = self.item_partitions.write().await;
+        let maybe_partition = item_partitions.get_mut(&partition);
         info!(
             "Adding item to partition: {:?}, key: {}, value: {:?}",
             partition, key.to_string(), value
         );
 
+        let mut items_delta = self.items_delta.write().await;
         if let Some(partition) = maybe_partition {
             partition.insert(key.clone(), value.clone());
-            self.items_delta.insert(key.clone(), value);
+            items_delta.insert(key.clone(), value);
         } else {
             let mut new_partition = HashMap::new();
             new_partition.insert(key.clone(), value.clone());
-            self.item_partitions.insert(*partition, new_partition);
-            self.items_delta.insert(key.clone(), value);
+            item_partitions.insert(*partition, new_partition);
+            items_delta.insert(key.clone(), value);
         }
         Ok(())
     }
 
-    async fn remove(&mut self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError> {
+    async fn remove(&self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError> {
         info!("Removing item from partition: {:?}, key: {}", partition, key.to_string());
+        let mut item_partitions = self.item_partitions.write().await;
 
-        let maybe_partition = self.item_partitions.get_mut(&partition);
+        let maybe_partition = item_partitions.get_mut(&partition);
         if let Some(partition) = maybe_partition {
             partition.remove(key);
         }
@@ -99,22 +105,26 @@ impl Store for InMemoryStore {
     }
 
     async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError> {
-        Ok(self.items_delta.iter().map(|(k, v)| ItemEntry::new(k.clone(), v.clone())).collect())
+        let items_delta = self.items_delta.read().await;
+        Ok(items_delta.iter().map(|(k, v)| ItemEntry::new(k.clone(), v.clone())).collect())
     }
 
-    async fn clear_all_delta(&mut self) -> Result<(), DataStoreError> {
-        self.items_delta.clear();
+    async fn clear_all_delta(&self) -> Result<(), DataStoreError> {
+        let mut items_delta = self.items_delta.write().await;
+        items_delta.clear();
         Ok(())
     }
 
-    async fn remove_from_delta(&mut self, key: &StorageKey) -> Result<(), DataStoreError> {
-        self.items_delta.remove(key);
+    async fn remove_from_delta(&self, key: &StorageKey) -> Result<(), DataStoreError> {
+        let mut items_delta = self.items_delta.write().await;
+        items_delta.remove(key);
         Ok(())
     }
 
     async fn partition_counts(&self) -> Result<HashMap<PartitionId, usize>, DataStoreError> {
+        let item_partitions = self.item_partitions.read().await;
         let mut counts = HashMap::new();
-        for (partition, items) in &self.item_partitions {
+        for (partition, items) in item_partitions.iter() {
             let mut counter = 0;
             for item in items.values() {
                 match item.status {
@@ -130,20 +140,21 @@ impl Store for InMemoryStore {
     }
 
     async fn delta_count(&self) -> Result<usize, DataStoreError> {
-        Ok(self.items_delta.values().len())
+        let items_delta = self.items_delta.read().await;
+        Ok(items_delta.values().len())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        gossip::HLC, item::{Item, ItemStatus}, partition::PartitionMap, store::{PartitionKey, RangeKey}
+        gossip::HLC, partition::PartitionMap, store::{PartitionKey, RangeKey}
     };
 
     #[tokio::test]
     async fn test_insert_item_pk_only() {
         use super::*;
-        let mut store = InMemoryStore::new();
+        let store = InMemoryStore::new();
         let partition_map = PartitionMap::new(&10, &2);
 
         let storage_key = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
@@ -171,7 +182,7 @@ mod tests {
     #[tokio::test]
     async fn test_insert_item_pk_and_rk() {
         use super::*;
-        let mut store = InMemoryStore::new();
+        let store = InMemoryStore::new();
         let partition_map = PartitionMap::new(&10, &2);
 
         let storage_key = StorageKey { partition_key: PartitionKey("123".to_string()), range_key: Some(RangeKey("456".to_string())) };
@@ -199,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn test_partition_counts() {
         use super::*;
-        let mut store = InMemoryStore::new();
+        let store = InMemoryStore::new();
 
         let partition1 = PartitionId(1);
         let partition2 = PartitionId(2);

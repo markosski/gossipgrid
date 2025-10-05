@@ -210,8 +210,6 @@ pub async fn send_gossip_ack(
     }
 
     env.get_event_publisher()
-        .write()
-        .await
         .publish(&crate::event::Event {
             address_from: local_addr.clone(),
             address_to: peer_addr.clone(),
@@ -254,8 +252,6 @@ async fn handle_join_message(
                 error!("node={}; Cluster is full, cannot join", &node.address);
 
                 env.get_event_publisher()
-                    .write()
-                    .await
                     .publish(&crate::event::Event {
                         address_from: message.node.address.clone(),
                         address_to: node.get_address().clone(),
@@ -289,8 +285,6 @@ async fn handle_join_message(
             .await;
 
             env.get_event_publisher()
-                .write()
-                .await
                 .publish(&crate::event::Event {
                     address_from: node.get_address().clone(),
                     address_to: node.address.clone(),
@@ -332,7 +326,7 @@ async fn handle_main_message(
         src.port()
     );
 
-    env.get_event_publisher().write().await.publish(&crate::event::Event {
+    env.get_event_publisher().publish(&crate::event::Event {
         address_from: node_id.clone(),
         address_to: node_state.get_address().clone(),
         message_type: "GossipReceived".to_string(),
@@ -354,7 +348,7 @@ async fn handle_main_message(
                 .to_joined_state(
                     message.cluster_config.clone(),
                     message.partition_map.clone(),
-                    env.get_store().read().await,
+                    env.get_store(),
                 )
                 .await {
                     Ok(n) => n,
@@ -382,8 +376,6 @@ async fn handle_main_message(
             // drop(node_state);
 
             env.get_event_publisher()
-                .write()
-                .await
                 .publish(&crate::event::Event {
                     address_from: address.clone(),
                     address_to: address.clone(),
@@ -454,8 +446,8 @@ async fn handle_main_message(
             if message.items_delta.len() > 0 {
                 let items = message.items_delta.clone();
 
-                let store_guard = env.get_store().write().await;
-                let added = node.add_items(&items, &src.to_string(), store_guard).await;
+                let store = env.get_store();
+                let added = node.add_items(&items, &src.to_string(), store).await;
 
                 if items.len() > 0 {
                     info!(
@@ -580,7 +572,7 @@ async fn handle_item_delta_message(
 
     match &mut *node_state {
         node::NodeState::Joined(node) => {
-            env.get_event_publisher().write().await.publish(&crate::event::Event {
+            env.get_event_publisher().publish(&crate::event::Event {
                 address_from: src.to_string(),
                 address_to: node.get_address().clone(),
                 message_type: "GossipAckReceived".to_string(),
@@ -597,7 +589,7 @@ async fn handle_item_delta_message(
             let _ = node.reconcile_delta_state(
                 &src.to_string(),
                 &message.items_received,
-                &mut env.get_store().write().await,
+                env.get_store(),
             )
             .await;
         }
@@ -788,8 +780,6 @@ async fn send_join_message(
     }
 
     env.get_event_publisher()
-        .write()
-        .await
         .publish(&crate::event::Event {
             address_from: node_state.address.clone(),
             address_to: join_node.clone(),
@@ -816,9 +806,9 @@ async fn send_gossip_to_peers(
     let node_hlc = node_state.node_hlc.clone();
     let mut peer_deltas = Vec::with_capacity(next_nodes.len());
     {
-        let store_guard = env.get_store().read().await;
+        let store = env.get_store();
         for peer_dest in next_nodes.iter() {
-            let items_delta = match node_state.get_delta_for_node(peer_dest, &store_guard).await {
+            let items_delta = match node_state.get_delta_for_node(peer_dest, store).await {
                 Ok(delta) => delta,
                 Err(e) => {
                     error!(
@@ -844,9 +834,9 @@ async fn send_gossip_to_peers(
             &items_delta.len()
         );
 
-        let store_guard = env.get_store().read().await;
+        let store = env.get_store();
 
-        let partition_counts = store_guard.partition_counts().await.unwrap_or(HashMap::new());
+        let partition_counts = store.partition_counts().await.unwrap_or(HashMap::new());
 
         let msg = GossipMessage {
             cluster_config: node_state.cluster_config.clone(),
@@ -861,7 +851,6 @@ async fn send_gossip_to_peers(
             },
             sync_response: is_sync_response,
         };
-        drop(store_guard);
 
         if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
             match socket.send_to(&encoded, &peer_dest).await {
@@ -897,14 +886,12 @@ async fn send_gossip_to_peers(
             if all_delta_count == 0 && !next_nodes.is_empty() {
                 // TODO: ensure error here is properly handled
                 let _ = node_state
-                    .clear_delta(&mut env.get_store().write().await)
+                    .clear_delta(env.get_store())
                     .await;
             }
         }
 
         env.get_event_publisher()
-            .write()
-            .await
             .publish(&crate::event::Event {
                 address_from: node_state.get_address().clone(),
                 address_to: peer_dest.clone(),
