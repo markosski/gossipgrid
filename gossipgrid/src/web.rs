@@ -232,7 +232,7 @@ async fn handle_post_item(
 
                     let this_node = node.address.clone();
                     {
-                        let store = env.get_store().write().await;
+                        let store = env.get_store();
                         match node.add_items(&vec![item_entry.clone()], &this_node, store).await {
                             Ok(_) => (),
                             Err(e) => {
@@ -309,9 +309,9 @@ async fn handle_get_items(
                 };
                 Ok(warp::reply::json(&response))
             } else {
-                let store_ref = env.get_store().read().await;
+                let store_ref = env.get_store();
 
-                let item_entries = match node.get_items(limit, &storage_key, &store_ref).await {
+                let item_entries = match node.get_items(limit, &storage_key, store_ref).await {
                     Ok(item_entry) => item_entry,
                     Err(e) => {
                         let response = ItemOpsResponseEnvelope {
@@ -409,7 +409,7 @@ async fn handle_remove_item(
                         .remove_item(
                             &storage_key,
                             &this_node_addr,
-                            &mut env.get_store().write().await,
+                            env.get_store(),
                         )
                         .await {
                             Ok(_) => true,

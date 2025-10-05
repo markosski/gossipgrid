@@ -73,20 +73,20 @@ pub trait Store: Send + Sync {
 
     /// Insert item by key and range_key
     /// If an item with the same key and range_key exists, it should be updated
-    async fn insert(&mut self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError>;
+    async fn insert(&self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError>;
 
     /// Remove item by key and optional range_key
     /// If range_key is None, remove all items with the given key
-    async fn remove(&mut self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError>;
+    async fn remove(&self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError>;
 
     /// Get all items in the delta
     async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError>;
 
     /// Clear all items in the delta
-    async fn clear_all_delta(&mut self) -> Result<(), DataStoreError>;
+    async fn clear_all_delta(&self) -> Result<(), DataStoreError>;
 
     /// Remove item from delta by key
-    async fn remove_from_delta(&mut self, key: &StorageKey) -> Result<(), DataStoreError>;
+    async fn remove_from_delta(&self, key: &StorageKey) -> Result<(), DataStoreError>;
 
     /// Get count of items in the delta
     async fn delta_count(&self) -> Result<usize, DataStoreError>;
