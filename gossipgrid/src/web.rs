@@ -245,7 +245,7 @@ async fn handle_post_item(
                         }
                     }
 
-                    send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
+                    send_gossip_single(None, socket.clone(), node, env.clone()).await;
 
                     let response = ItemOpsResponseEnvelope {
                         success: Some(
@@ -429,7 +429,7 @@ async fn handle_remove_item(
                             error: None,
                         };
 
-                        send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
+                        send_gossip_single(None, socket.clone(), node, env.clone()).await;
                     } else {
                         response = ItemGenericResponseEnvelope {
                             success: None,

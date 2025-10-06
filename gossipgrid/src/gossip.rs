@@ -14,7 +14,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
@@ -30,12 +29,6 @@ pub struct HLC {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct SyncRequest {
-    pub is_sync_request: bool,
-    pub since: HLC,
-}
-
-#[derive(Debug, Clone, Encode, Decode)]
 pub struct GossipAck {
     pub items_received: Vec<ItemEntry>,
 }
@@ -44,9 +37,7 @@ pub struct GossipAck {
 pub struct GossipJoinMessage {
     pub node: Node,
     pub peer_address: String,
-    pub node_hlc: HLC,
-    pub sync_request: SyncRequest,
-    pub sync_response: bool,
+    pub node_hlc: HLC
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
@@ -56,9 +47,7 @@ pub struct GossipMessage {
     pub partition_item_counts: HashMap<PartitionId, usize>,
     pub all_peers: HashMap<String, Node>,
     pub node_hlc: HLC,
-    pub items_delta: Vec<ItemEntry>,
-    pub sync_request: SyncRequest,
-    pub sync_response: bool,
+    pub items_delta: Vec<ItemEntry>
 }
 
 impl HLC {
@@ -124,7 +113,6 @@ impl RangeBounds<HLC> for HLC {
 pub async fn receive_gossip(
     socket: Arc<UdpSocket>,
     node_state: Arc<RwLock<NodeState>>,
-    sync_flag: Arc<Mutex<bool>>,
     env: Arc<Env>,
 ) {
     let mut buf = [0u8; BUFFER_SIZE];
@@ -139,7 +127,6 @@ pub async fn receive_gossip(
                     handle_main_message(
                         &src,
                         socket.clone(),
-                        sync_flag.clone(),
                         message,
                         node_state.clone(),
                         env.clone(),
@@ -152,7 +139,6 @@ pub async fn receive_gossip(
                     handle_join_message(
                         &src,
                         socket.clone(),
-                        sync_flag.clone(),
                         message,
                         node_state.clone(),
                         env.clone(),
@@ -230,7 +216,6 @@ pub async fn send_gossip_ack(
 async fn handle_join_message(
     src: &SocketAddr,
     socket: Arc<UdpSocket>,
-    sync_flag: Arc<Mutex<bool>>,
     message: GossipJoinMessage,
     state: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
@@ -279,7 +264,6 @@ async fn handle_join_message(
                 Some(&src.to_string()),
                 socket.clone(),
                 node,
-                false,
                 env.clone(),
             )
             .await;
@@ -311,7 +295,6 @@ async fn handle_join_message(
 async fn handle_main_message(
     src: &SocketAddr,
     socket: Arc<UdpSocket>,
-    sync_flag: Arc<Mutex<bool>>,
     message: GossipMessage,
     state: Arc<RwLock<NodeState>>,
     env: Arc<Env>,
@@ -333,8 +316,6 @@ async fn handle_main_message(
         data: serde_json::json!({
             "delta_size": message.items_delta.len(),
             "item_ids": message.items_delta.iter().map(|e| e.storage_key.to_string()).collect::<Vec<_>>(),
-            "sync_request": message.sync_request.is_sync_request,
-            "sync_response": message.sync_response,
         }),
         timestamp: now_millis(),
     }).await;
@@ -470,7 +451,8 @@ async fn handle_main_message(
                     // Immediately forward newly received deltas to other peers so they don't
                     // have to wait for the periodic gossip interval. We rely on the
                     // items_delta_cache to avoid sending the delta back to the origin.
-                    send_gossip_single(None, socket.clone(), node, false, env.clone()).await;
+                    // TODO: Currently this does not work well causing very chatty exchange.
+                    // send_gossip_single(None, socket.clone(), node, env.clone()).await;
                 } else {
                     debug!(
                         "node={}; No new items added from {}",
@@ -480,69 +462,10 @@ async fn handle_main_message(
                 }
             }
 
-            // Data sync
-            // if message.sync_request.is_sync_request && node.cluster_size() > 1 {
-            //     info!("node={}; Syncing back to {}", node.get_address(), &src);
-            //     let mut items: Vec<ItemEntry> = vec![];
-
-            //     if let Some(src_node) = node.all_peers.get(&src.to_string()) {
-            //         let last_seen_hlc = HLC::new().tick_hlc(src_node.last_seen.clone());
-            //         let store_guard = env.get_store().read().await;
-
-            //         let items_since = match node.items_since(&last_seen_hlc, &store_guard).await {
-            //             Ok(items) => items,
-            //             Err(e) => {
-            //                 error!("node={}; Failed to get items since {:?}: {}", node.get_address(), &last_seen_hlc, e.to_string());
-            //                 vec![]
-            //             }
-            //         };
-
-            //         for entry in items_since {
-            //             let maybe_item = match node.get_item(&entry.item.id, &store_guard).await {
-            //                 Ok(i) => i,
-            //                 Err(e) => {
-            //                     error!("node={}; Failed to get item {}: {}", node.get_address(), &entry.item.id, e.to_string());
-            //                     continue;
-            //                 }
-            //             };
-
-            //             if let Some(e) = maybe_item {
-            //                 items.push(e.clone());
-            //             }
-            //         }
-            //         info!(
-            //             "node={}; Sync identifier {} items to send since {}",
-            //             node.get_address(),
-            //             &items.len(),
-            //             src_node.last_seen
-            //         );
-            //     } else {
-            //         error!(
-            //             "node={}; Cannot find source node in peers list",
-            //             &node.get_address()
-            //         );
-            //         return;
-            //     }
-
-            //     send_gossip_single(
-            //         Some(&src.to_string()),
-            //         socket.clone(),
-            //         node,
-            //         false,
-            //         env.clone(),
-            //     )
-            //     .await;
-            // }
-
             // bump last update time, it is important this happens after the sync
             node.all_peers.entry(src.to_string()).and_modify(|node| {
                 node.last_seen = now_millis();
             });
-
-            if message.sync_response {
-                let mut sync = sync_flag.lock().await;
-                *sync = false; // TODO: understand how this works
-            }
         }
         _ => {
             error!(
@@ -607,7 +530,6 @@ pub async fn send_gossip_single(
     peer_addr: Option<&String>,
     socket: Arc<UdpSocket>,
     node_state: &mut JoinedNode,
-    is_sync: bool,
     env: Arc<Env>,
 ) {
     let mut peers: Vec<String> = vec![];
@@ -618,14 +540,13 @@ pub async fn send_gossip_single(
     }
 
     // Send gossip to next nodes
-    send_gossip_to_peers(&peers, node_state, false, is_sync, &socket, env.clone()).await;
+    send_gossip_to_peers(&peers, node_state, &socket, env.clone()).await;
 }
 
 pub async fn send_gossip_on_interval(
     local_addr: String,
     socket: Arc<UdpSocket>,
     node_state: Arc<RwLock<NodeState>>,
-    sync_flag: Arc<Mutex<bool>>,
     env: Arc<Env>,
 ) {
     loop {
@@ -633,7 +554,6 @@ pub async fn send_gossip_on_interval(
 
         match &mut *node_state {
             node::NodeState::Joined(this_node) => {
-                let sync_flag = sync_flag.lock().await;
                 let now_millis = now_millis();
 
                 // Remove peers that haven't responded within FAILURE_TIMEOUT
@@ -661,8 +581,6 @@ pub async fn send_gossip_on_interval(
                 send_gossip_to_peers(
                     &next_nodes,
                     this_node,
-                    sync_flag.clone(),
-                    false,
                     &socket,
                     env.clone(),
                 )
@@ -707,8 +625,6 @@ pub async fn send_gossip_on_interval(
                 send_join_message(
                     &this_node.peer_node,
                     this_node,
-                    false,
-                    false,
                     &socket,
                     env.clone(),
                 )
@@ -738,8 +654,6 @@ pub async fn send_gossip_on_interval(
 async fn send_join_message(
     join_node: &String,
     node_state: &PreJoinNode,
-    sync_flag: bool,
-    is_sync_response: bool,
     socket: &UdpSocket,
     env: Arc<Env>,
 ) {
@@ -751,11 +665,6 @@ async fn send_join_message(
         },
         peer_address: join_node.clone(),
         node_hlc: node_state.node_hlc.clone(),
-        sync_request: SyncRequest {
-            is_sync_request: sync_flag,
-            since: HLC::new(),
-        },
-        sync_response: is_sync_response,
     };
 
     if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
@@ -784,10 +693,7 @@ async fn send_join_message(
             address_from: node_state.address.clone(),
             address_to: join_node.clone(),
             message_type: "JoinSent".to_string(),
-            data: serde_json::json!({
-                "sync_request": sync_flag,
-                "sync_response": is_sync_response,
-            }),
+            data: serde_json::json!("{}".to_string()),
             timestamp: now_millis(),
         })
         .await;
@@ -796,8 +702,6 @@ async fn send_join_message(
 async fn send_gossip_to_peers(
     next_nodes: &[String],
     node_state: &mut JoinedNode,
-    sync_flag: bool,
-    is_sync_response: bool,
     socket: &UdpSocket,
     env: Arc<Env>,
 ) {
@@ -805,24 +709,23 @@ async fn send_gossip_to_peers(
 
     let node_hlc = node_state.node_hlc.clone();
     let mut peer_deltas = Vec::with_capacity(next_nodes.len());
-    {
-        let store = env.get_store();
-        for peer_dest in next_nodes.iter() {
-            let items_delta = match node_state.get_delta_for_node(peer_dest, store).await {
-                Ok(delta) => delta,
-                Err(e) => {
-                    error!(
-                        "node={}; Error getting deltas for node {}",
-                        node_state.get_address(),
-                        e
-                    );
-                    vec![]
-                }
-            };
+    
+    let store = env.get_store();
+    for peer_dest in next_nodes.iter() {
+        let items_delta = match node_state.get_delta_for_node(peer_dest, store).await {
+            Ok(delta) => delta,
+            Err(e) => {
+                error!(
+                    "node={}; Error getting deltas for node {}",
+                    node_state.get_address(),
+                    e
+                );
+                vec![]
+            }
+        };
 
-            all_delta_count += items_delta.len();
-            peer_deltas.push((peer_dest.clone(), items_delta));
-        }
+        all_delta_count += items_delta.len();
+        peer_deltas.push((peer_dest.clone(), items_delta));
     }
 
     // send specific deltas to each peer
@@ -845,11 +748,6 @@ async fn send_gossip_to_peers(
             all_peers: node_state.all_peers.clone(),
             node_hlc: node_hlc.clone(),
             items_delta: items_delta.clone(),
-            sync_request: SyncRequest {
-                is_sync_request: sync_flag,
-                since: HLC::new(),
-            },
-            sync_response: is_sync_response,
         };
 
         if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
@@ -873,22 +771,20 @@ async fn send_gossip_to_peers(
             return;
         }
 
-        if !sync_flag {
-            node_state.add_delta_state(
-                &items_delta,
-                DeltaAckState {
-                    peers_pending: vec![peer_dest.clone()].into_iter().collect(),
-                    created_at: now_millis(),
-                },
-            );
+        node_state.add_delta_state(
+            &items_delta,
+            DeltaAckState {
+                peers_pending: vec![peer_dest.clone()].into_iter().collect(),
+                created_at: now_millis(),
+            },
+        );
 
-            // Remove delta items if everyone we know has received them
-            if all_delta_count == 0 && !next_nodes.is_empty() {
-                // TODO: ensure error here is properly handled
-                let _ = node_state
-                    .clear_delta(env.get_store())
-                    .await;
-            }
+        // Remove delta items if everyone we know has received them
+        if all_delta_count == 0 && !next_nodes.is_empty() {
+            // TODO: ensure error here is properly handled
+            let _ = node_state
+                .clear_delta(env.get_store())
+                .await;
         }
 
         env.get_event_publisher()
@@ -899,19 +795,16 @@ async fn send_gossip_to_peers(
                 data: serde_json::json!({
                     "delta_size": items_delta.len(),
                     "item_ids": items_delta.iter().map(|e| e.storage_key.to_string()).collect::<Vec<_>>(),
-                    "sync_request": sync_flag,
-                    "sync_response": is_sync_response,
                 }),
                 timestamp: now_millis(),
             })
             .await;
 
         info!(
-            "node={}; sent {:?} to {:?}; sync={}",
+            "node={}; sent {:?} to {:?}",
             node_state.get_address(),
             msg,
             &peer_dest,
-            &sync_flag
         );
     }
 }

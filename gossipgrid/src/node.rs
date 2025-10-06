@@ -60,13 +60,11 @@ pub async fn start_node(
         local_addr.clone(),
         socket.clone(),
         node_state.clone(),
-        sync_flag.clone(),
         env.clone(),
     ));
     let receiving = tokio::spawn(receive_gossip(
         socket.clone(),
         node_state.clone(),
-        sync_flag.clone(),
         env.clone(),
     ));
 
