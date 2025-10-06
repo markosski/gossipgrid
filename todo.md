@@ -32,6 +32,7 @@ RECENTLY DONE
 
 TODO
 * delta sync
+* deleting non existing item return success
 * ensure when retrieving an item for VNODE we also check active Nodes 
 * cluster replicas don't seem to be evenly distributed
 
