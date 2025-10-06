@@ -41,6 +41,16 @@ pub struct GossipJoinMessage {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
+pub struct GossipSyncCheckMessage {
+    pub cluster_config: ClusterConfig,
+    pub partition_map: PartitionMap,
+    pub partition_item_counts: HashMap<PartitionId, usize>,
+    pub all_peers: HashMap<String, Node>,
+    pub node_hlc: HLC,
+    pub last_item_sync_hlc: HLC
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct GossipMessage {
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
@@ -148,8 +158,13 @@ pub async fn receive_gossip(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    handle_item_delta_message(&src, message, node_state.clone(), env.clone()).await;
-                };
+                    handle_item_delta_ack_message(&src, message, node_state.clone(), env.clone()).await;
+                } else if let Ok((message, _)) = bincode::decode_from_slice::<GossipSyncCheckMessage, _>(
+                    &buf[..size], 
+                    bincode::config::standard()
+                ) {
+                    handle_sync_check_message(&src, message, node_state.clone(), env.clone()).await;
+                }
             }
             Err(e) => {
                 error!("Receive error: {}", e);
@@ -477,7 +492,7 @@ async fn handle_main_message(
     }
 }
 
-async fn handle_item_delta_message(
+async fn handle_item_delta_ack_message(
     src: &SocketAddr,
     message: GossipAck,
     state: Arc<RwLock<NodeState>>,
@@ -524,6 +539,15 @@ async fn handle_item_delta_message(
             return;
         }
     }
+}
+
+async fn handle_sync_check_message(
+    src: &SocketAddr,
+    message: GossipSyncCheckMessage,
+    state: Arc<RwLock<NodeState>>,
+    env: Arc<Env>,
+) {
+    panic!("not implemented")
 }
 
 pub async fn send_gossip_single(
