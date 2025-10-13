@@ -1,10 +1,6 @@
-use gossipgrid::{
-    node::{NodeState},
-};
+use gossipgrid::node::NodeState;
 
-use gossipgrid::web::{
-    ItemOpsResponseEnvelope
-};
+use gossipgrid::web::ItemOpsResponseEnvelope;
 
 mod helpers;
 
@@ -43,7 +39,13 @@ async fn test_publish_and_retrieve_items() {
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
 
     let item_count = response.success.as_ref().unwrap().len().clone();
-    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
+    let item_msg = response
+        .success
+        .unwrap()
+        .get(0)
+        .unwrap()
+        .message_string()
+        .unwrap();
 
     assert!(item_count == 1);
     assert!(item_msg.contains("foo1"));
@@ -142,7 +144,13 @@ async fn test_publish_and_delete_item() {
 
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
+    let item_msg = response
+        .success
+        .unwrap()
+        .get(0)
+        .unwrap()
+        .message_string()
+        .unwrap();
 
     assert!(item_msg.contains("foo1"));
 
@@ -155,7 +163,6 @@ async fn test_publish_and_delete_item() {
         .await
         .unwrap();
 
-    
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let res = client
@@ -207,7 +214,13 @@ async fn test_publish_and_upsert_item() {
 
     let response: ItemOpsResponseEnvelope =
         serde_json::from_str(res.text().await.unwrap().as_str()).unwrap();
-    let item_msg = response.success.unwrap().get(0).unwrap().message_string().unwrap();
+    let item_msg = response
+        .success
+        .unwrap()
+        .get(0)
+        .unwrap()
+        .message_string()
+        .unwrap();
 
     assert!(item_msg.contains("foo1"));
 
@@ -241,7 +254,7 @@ async fn test_publish_and_upsert_item() {
     // let node_memory = &nodes[2].1;
     // let guard = node_memory.read().await;
     // if let gossipgrid::node::NodeState::Joined(state) = &*guard {
-    //     let item = state.get_delta_state().get("123").unwrap();
+    //     let item = state.ge().get("123").unwrap();
     //     assert_eq!(item.message, "foo2");
     // } else {
     //     panic!("Node is not in Joined state");

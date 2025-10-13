@@ -31,3 +31,5 @@ When a node receives an ACK, it removes the sender from peers_pending. If peers_
 
 * Sending Deltas:
 get_delta_for_node determines which items to send to each peer, using items_delta and items_delta_cache.
+
+## To Tick or not to Tick

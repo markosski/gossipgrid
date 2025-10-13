@@ -1,18 +1,16 @@
 use crate::env::Env;
 use crate::gossip::{HLC, send_gossip_single};
-use crate::item::{
-    Item, ItemEntry, ItemStatus
-};
+use crate::item::{Item, ItemEntry, ItemStatus};
 use crate::node::{self, JoinedNode, NodeState};
-use crate::store::{StorageKey, PartitionKey, RangeKey};
-use crate::{now_millis};
+use crate::now_millis;
+use crate::store::{PartitionKey, RangeKey, StorageKey};
 use base64::engine::general_purpose;
 use bincode::{Decode, Encode};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-use warp::filters::path::FullPath;
 use std::collections::HashMap;
 use std::net::{AddrParseError, SocketAddr};
+use warp::filters::path::FullPath;
 
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -26,14 +24,16 @@ const CANNOT_PERFORM_ACTION_IN_CURRENT_STATE: &str =
 pub struct ItemResponse {
     pub message: String,
     pub status: ItemStatus,
-    pub hlc: HLC
+    pub hlc: HLC,
 }
 
 impl ItemResponse {
     pub fn message_string(&self) -> Result<String, String> {
         use base64::prelude::*;
 
-        let decoded_bytes = general_purpose::STANDARD.decode(&self.message).map_err(|e| e.to_string())?;
+        let decoded_bytes = general_purpose::STANDARD
+            .decode(&self.message)
+            .map_err(|e| e.to_string())?;
         match String::from_utf8(decoded_bytes) {
             Ok(s) => Ok(s),
             Err(e) => Err(e.to_string()),
@@ -48,7 +48,7 @@ impl From<Item> for ItemResponse {
         ItemResponse {
             message: general_purpose::STANDARD.encode(&item.message),
             status: item.status,
-            hlc: item.hlc
+            hlc: item.hlc,
         }
     }
 }
@@ -181,12 +181,16 @@ pub async fn try_route_request<T: Serialize, P: for<'de> Deserialize<'de>>(
         .or(Err("Failed to send request".to_string()))?;
 
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    info!(
+        "**************** node={}; Routed response: {:?}",
+        node.get_address(),
+        String::from_utf8(bytes.to_vec())
+    );
     let response_message = serde_json::from_slice::<P>(&bytes).map_err(|e| e.to_string())?;
 
     Ok(Some(response_message))
 }
 
-// TODO: Implement the redirect filter for all endpoints
 async fn handle_post_item(
     req_path: FullPath,
     item_submit: ItemCreateUpdate,
@@ -197,6 +201,15 @@ async fn handle_post_item(
     let mut memory = memory.write().await;
     match &mut *memory {
         node::NodeState::Joined(node) => {
+            if !node.is_cluster_formed() {
+                error!("Cluster not yet formed, skipping gossip send");
+                let response = ItemOpsResponseEnvelope {
+                    success: None,
+                    error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
+                };
+                return Ok(warp::reply::json(&response));
+            }
+
             let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
                 node,
                 &item_submit.partition_key,
@@ -207,53 +220,60 @@ async fn handle_post_item(
             .await;
             let storage_key = StorageKey::new(
                 PartitionKey(item_submit.partition_key.clone()),
-                item_submit.range_key.map(|rk| RangeKey(rk))
+                item_submit.range_key.map(|rk| RangeKey(rk)),
             );
 
             match routed_response {
                 Ok(Some(valid_routed_response)) => Ok(warp::reply::json(&valid_routed_response)),
                 Ok(None) => {
-                    info!("Routing to this node");
-                    let now = now_millis();
-
-                    let item = Item {
-                        message: item_submit.message.clone().as_bytes().to_vec(),
-                        status: ItemStatus::Active,
-                        hlc: HLC {
-                            timestamp: now.clone(),
-                            counter: 0,
-                        },
-                    };
-
-                    let item_entry = ItemEntry {
-                        storage_key: storage_key,
-                        item: item.clone(),
-                    };
-
                     let this_node = node.address.clone();
+                    let message_bytes = item_submit.message.clone().as_bytes().to_vec();
+                    match node
+                        .add_local_item(&storage_key, message_bytes, &this_node, env.clone())
+                        .await
                     {
-                        let store = env.get_store();
-                        match node.add_items(&vec![item_entry.clone()], &this_node, store).await {
-                            Ok(_) => (),
-                            Err(e) => {
-                                let response = ItemOpsResponseEnvelope {
-                                    success: None,
-                                    error: Some(format!("Item submission error: {}", e)),
-                                };
-                                return Ok(warp::reply::json(&response));
-                            }
+                        Ok(_) => (),
+                        Err(e) => {
+                            let response = ItemOpsResponseEnvelope {
+                                success: None,
+                                error: Some(format!("Item submission error: {}", e)),
+                            };
+                            return Ok(warp::reply::json(&response));
                         }
                     }
 
                     send_gossip_single(None, socket.clone(), node, env.clone()).await;
 
-                    let response = ItemOpsResponseEnvelope {
-                        success: Some(
-                            vec![item_entry.item.into()]
-                        ),
-                        error: None,
-                    };
-                    Ok(warp::reply::json(&response))
+                    let item = node.get_item(&storage_key, env.get_store()).await;
+                    match item {
+                        Err(e) => {
+                            let response = ItemOpsResponseEnvelope {
+                                success: None,
+                                error: Some(format!(
+                                    "Item retrieval error after submission: {}",
+                                    e
+                                )),
+                            };
+                            Ok(warp::reply::json(&response))
+                        }
+                        Ok(None) => {
+                            let response = ItemOpsResponseEnvelope {
+                                success: None,
+                                error: Some(format!(
+                                    "Item not found after submission: {}",
+                                    storage_key.to_string()
+                                )),
+                            };
+                            Ok(warp::reply::json(&response))
+                        }
+                        Ok(Some(item_entry)) => {
+                            let response = ItemOpsResponseEnvelope {
+                                success: Some(vec![ItemResponse::from(item_entry.item).into()]),
+                                error: None,
+                            };
+                            Ok(warp::reply::json(&response))
+                        }
+                    }
                 }
                 Err(err) => {
                     let response = ItemOpsResponseEnvelope {
@@ -285,6 +305,15 @@ async fn handle_get_items(
 
     match &*memory {
         node::NodeState::Joined(node) => {
+            if !node.is_cluster_formed() {
+                error!("Cluster not yet formed, skipping gossip send");
+                let response = ItemOpsResponseEnvelope {
+                    success: None,
+                    error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
+                };
+                return Ok(warp::reply::json(&response));
+            }
+
             let storage_key: StorageKey = store_key.parse().unwrap();
             let storage_key_string = storage_key.to_string();
             let query_with_q = map_to_query_string(&params);
@@ -298,7 +327,10 @@ async fn handle_get_items(
             )
             .await;
 
-            let limit = params.get("limit").map(|v| v.parse::<usize>().unwrap_or(10)).unwrap_or(10);
+            let limit = params
+                .get("limit")
+                .map(|v| v.parse::<usize>().unwrap_or(10))
+                .unwrap_or(10);
 
             if let Ok(Some(valid_routed_response)) = routed_response {
                 Ok(warp::reply::json(&valid_routed_response))
@@ -325,7 +357,11 @@ async fn handle_get_items(
                 if item_entries.len() > 0 {
                     let response = ItemOpsResponseEnvelope {
                         success: Some(
-                            item_entries.iter().cloned().map(|ie| ie.item.into()).collect()
+                            item_entries
+                                .iter()
+                                .cloned()
+                                .map(|ie| ie.item.into())
+                                .collect(),
                         ),
                         error: None,
                     };
@@ -356,6 +392,15 @@ async fn handle_get_item_count(
 
     match &*memory {
         node::NodeState::Joined(node) => {
+            if !node.is_cluster_formed() {
+                error!("Cluster not yet formed, skipping gossip send");
+                let response = ItemOpsResponseEnvelope {
+                    success: None,
+                    error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
+                };
+                return Ok(warp::reply::json(&response));
+            }
+
             let tasks_count = node.items_count();
             let response = ItemGenericResponseEnvelope {
                 success: Some(
@@ -388,16 +433,26 @@ async fn handle_remove_item(
 
     match &mut *memory {
         node::NodeState::Joined(node) => {
+            if !node.is_cluster_formed() {
+                error!("Cluster not yet formed, skipping gossip send");
+                let response = ItemOpsResponseEnvelope {
+                    success: None,
+                    error: Some(CANNOT_PERFORM_ACTION_IN_CURRENT_STATE.to_string()),
+                };
+                return Ok(warp::reply::json(&response));
+            }
+
             let storage_key: StorageKey = store_key.parse().unwrap();
             let storage_key_string = storage_key.to_string();
-            let routed_response = try_route_request::<ItemCreateUpdate, ItemOpsResponseEnvelope>(
-                node,
-                &storage_key_string,
-                req_path.as_str(),
-                ProxyMethod::Delete,
-                None,
-            )
-            .await;
+            let routed_response =
+                try_route_request::<ItemCreateUpdate, ItemGenericResponseEnvelope>(
+                    node,
+                    &storage_key_string,
+                    req_path.as_str(),
+                    ProxyMethod::Delete,
+                    None,
+                )
+                .await;
 
             match routed_response {
                 Ok(Some(valid_routed_response)) => Ok(warp::reply::json(&valid_routed_response)),
@@ -405,27 +460,27 @@ async fn handle_remove_item(
                     let response: ItemGenericResponseEnvelope;
                     let this_node_addr = node.get_address().clone();
 
-                    let is_success = match node
-                        .remove_item(
-                            &storage_key,
-                            &this_node_addr,
-                            env.get_store(),
-                        )
-                        .await {
-                            Ok(_) => true,
-                            Err(e) => {
-                                error!("Error removing item: {}", e);
-                                return Ok(warp::reply::json(
-                                &ItemGenericResponseEnvelope {
-                                    success: None,
-                                    error: Some(format!("Item not found: {}", &storage_key_string)),
-                                }));
-                            }
-                        };
+                    let removed_existing_item = match node
+                        .remove_local_item(&storage_key, &this_node_addr, env.clone())
+                        .await
+                    {
+                        Ok(item_exists) => item_exists,
+                        Err(e) => {
+                            error!("Error removing item: {}", e);
+                            return Ok(warp::reply::json(&ItemGenericResponseEnvelope {
+                                success: None,
+                                error: Some(format!("Item not found: {}", &storage_key_string)),
+                            }));
+                        }
+                    };
 
-                    if is_success {
+                    if removed_existing_item {
                         response = ItemGenericResponseEnvelope {
-                            success: Some(vec![("id".to_string(), storage_key_string.clone())].into_iter().collect()),
+                            success: Some(
+                                vec![("id".to_string(), storage_key_string.clone())]
+                                    .into_iter()
+                                    .collect(),
+                            ),
                             error: None,
                         };
 
@@ -436,6 +491,7 @@ async fn handle_remove_item(
                             error: Some(format!("Item not found: {}", &storage_key_string)),
                         };
                     }
+
                     Ok(warp::reply::json(&response))
                 }
                 Err(err) => {
@@ -496,14 +552,9 @@ pub async fn web_server(
     let address = local_web_addr
         .parse::<SocketAddr>()
         .expect("Failed to parse address for web server");
-    warp::serve(
-        post_item
-            .or(get_items)
-            .or(get_items_count)
-            .or(remove_item)
-    )
-    .run(address)
-    .await;
+    warp::serve(post_item.or(get_items).or(get_items_count).or(remove_item))
+        .run(address)
+        .await;
 }
 
 #[cfg(test)]

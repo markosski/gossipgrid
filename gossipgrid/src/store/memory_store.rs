@@ -4,12 +4,11 @@ use log::info;
 use tokio::sync::RwLock;
 
 use crate::gossip::HLC;
-use crate::partition::{PartitionId};
+use crate::partition::PartitionId;
 
 // Add this import or definition for ItemId
 use crate::item::{self, Item, ItemEntry, ItemStatus};
 use crate::store::{DataStoreError, StorageKey, Store};
-
 
 pub struct InMemoryStore {
     item_partitions: RwLock<HashMap<PartitionId, HashMap<StorageKey, Item>>>,
@@ -27,17 +26,21 @@ impl InMemoryStore {
 
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
-    async fn get(&self, partition_id: &PartitionId, key: &StorageKey) -> Result<Option<ItemEntry>, DataStoreError> {
+    async fn get(
+        &self,
+        partition_id: &PartitionId,
+        key: &StorageKey,
+    ) -> Result<Option<ItemEntry>, DataStoreError> {
         let item_partitions = self.item_partitions.read().await;
         let maybe_partition = item_partitions.get(&partition_id);
         if let Some(partition) = maybe_partition {
-            let item_entry = partition.get(key).map(|x| ItemEntry::new(key.clone(), x.clone()));
-            if let Some(item) = item_entry && item.item.status == ItemStatus::Active {
-                if item.item.status == ItemStatus::Active {
-                    Ok(Some(item))
-                } else {
-                    Ok(None)
-                }
+            let item_entry = partition
+                .get(key)
+                .map(|x| ItemEntry::new(key.clone(), x.clone()));
+            if let Some(item) = item_entry
+                && item.item.status == ItemStatus::Active
+            {
+                Ok(Some(item))
             } else {
                 Ok(None)
             }
@@ -46,10 +49,15 @@ impl Store for InMemoryStore {
         }
     }
 
-    async fn get_many(&self, partition_id: &PartitionId, key: &StorageKey, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+    async fn get_many(
+        &self,
+        partition_id: &PartitionId,
+        key: &StorageKey,
+        limit: usize,
+    ) -> Result<Vec<ItemEntry>, DataStoreError> {
         let item_partitions = self.item_partitions.read().await;
         let maybe_partition = item_partitions.get(&partition_id);
-        let mut data: Vec<ItemEntry> = vec!();
+        let mut data: Vec<ItemEntry> = vec![];
         let mut counter = 0;
         if let Some(partition) = maybe_partition {
             for (storage_key, item) in partition.iter() {
@@ -57,13 +65,23 @@ impl Store for InMemoryStore {
                     break;
                 }
 
-                if item.status == ItemStatus::Active && storage_key.partition_key == key.partition_key {
-                    if let (Some(range_key), Some(key_range_key)) = (&storage_key.range_key, &key.range_key) 
-                    && range_key.value().contains(key_range_key.value()) {
-                        data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
+                if item.status == ItemStatus::Active
+                    && storage_key.partition_key == key.partition_key
+                {
+                    if let (Some(range_key), Some(key_range_key)) =
+                        (&storage_key.range_key, &key.range_key)
+                        && range_key.value().contains(key_range_key.value())
+                    {
+                        data.push(ItemEntry {
+                            storage_key: storage_key.clone(),
+                            item: item.clone(),
+                        });
                         counter += 1;
                     } else if key.range_key.is_none() {
-                        data.push(ItemEntry { storage_key: storage_key.clone(), item: item.clone() });
+                        data.push(ItemEntry {
+                            storage_key: storage_key.clone(),
+                            item: item.clone(),
+                        });
                         counter += 1;
                     }
                 }
@@ -72,16 +90,28 @@ impl Store for InMemoryStore {
         Ok(data)
     }
 
-    async fn get_from(&self, partition: &PartitionId, hlc: HLC, limit: usize) -> Result<Vec<ItemEntry>, DataStoreError> {
+    async fn get_from(
+        &self,
+        partition: &PartitionId,
+        hlc: HLC,
+        limit: usize,
+    ) -> Result<Vec<ItemEntry>, DataStoreError> {
         Ok(vec![])
     }
 
-    async fn insert(&self, partition: &PartitionId, key: &StorageKey, value: Item) -> Result<(), DataStoreError> {
+    async fn insert(
+        &self,
+        partition: &PartitionId,
+        key: &StorageKey,
+        value: Item,
+    ) -> Result<(), DataStoreError> {
         let mut item_partitions = self.item_partitions.write().await;
         let maybe_partition = item_partitions.get_mut(&partition);
         info!(
             "Adding item to partition: {:?}, key: {}, value: {:?}",
-            partition, key.to_string(), value
+            partition,
+            key.to_string(),
+            value
         );
 
         let mut items_delta = self.items_delta.write().await;
@@ -97,8 +127,16 @@ impl Store for InMemoryStore {
         Ok(())
     }
 
-    async fn remove(&self, partition: &PartitionId, key: &StorageKey) -> Result<(), DataStoreError> {
-        info!("Removing item from partition: {:?}, key: {}", partition, key.to_string());
+    async fn remove(
+        &self,
+        partition: &PartitionId,
+        key: &StorageKey,
+    ) -> Result<(), DataStoreError> {
+        info!(
+            "Removing item from partition: {:?}, key: {}",
+            partition,
+            key.to_string()
+        );
         let mut item_partitions = self.item_partitions.write().await;
 
         let maybe_partition = item_partitions.get_mut(&partition);
@@ -110,7 +148,10 @@ impl Store for InMemoryStore {
 
     async fn get_all_delta(&self) -> Result<Vec<ItemEntry>, DataStoreError> {
         let items_delta = self.items_delta.read().await;
-        Ok(items_delta.iter().map(|(k, v)| ItemEntry::new(k.clone(), v.clone())).collect())
+        Ok(items_delta
+            .iter()
+            .map(|(k, v)| ItemEntry::new(k.clone(), v.clone()))
+            .collect())
     }
 
     async fn clear_all_delta(&self) -> Result<(), DataStoreError> {
@@ -152,7 +193,9 @@ impl Store for InMemoryStore {
 #[cfg(test)]
 mod tests {
     use crate::{
-        gossip::HLC, partition::PartitionMap, store::{PartitionKey, RangeKey}
+        gossip::HLC,
+        partition::PartitionMap,
+        store::{PartitionKey, RangeKey},
     };
 
     #[tokio::test]
@@ -161,7 +204,10 @@ mod tests {
         let store = InMemoryStore::new();
         let partition_map = PartitionMap::new(&10, &2);
 
-        let storage_key = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
+        let storage_key = StorageKey {
+            partition_key: PartitionKey("item1".to_string()),
+            range_key: None,
+        };
         let partition = partition_map.hash_key(&storage_key.to_string());
 
         let _ = store
@@ -189,7 +235,10 @@ mod tests {
         let store = InMemoryStore::new();
         let partition_map = PartitionMap::new(&10, &2);
 
-        let storage_key = StorageKey { partition_key: PartitionKey("123".to_string()), range_key: Some(RangeKey("456".to_string())) };
+        let storage_key = StorageKey {
+            partition_key: PartitionKey("123".to_string()),
+            range_key: Some(RangeKey("456".to_string())),
+        };
         let partition = partition_map.hash_key(&storage_key.partition_key.value());
 
         let _ = store
@@ -219,9 +268,18 @@ mod tests {
         let partition1 = PartitionId(1);
         let partition2 = PartitionId(2);
 
-        let storage_key1 = StorageKey { partition_key: PartitionKey("item1".to_string()), range_key: None };
-        let storage_key2 = StorageKey { partition_key: PartitionKey("item2".to_string()), range_key: None };
-        let storage_key3 = StorageKey { partition_key: PartitionKey("item3".to_string()), range_key: None };
+        let storage_key1 = StorageKey {
+            partition_key: PartitionKey("item1".to_string()),
+            range_key: None,
+        };
+        let storage_key2 = StorageKey {
+            partition_key: PartitionKey("item2".to_string()),
+            range_key: None,
+        };
+        let storage_key3 = StorageKey {
+            partition_key: PartitionKey("item3".to_string()),
+            range_key: None,
+        };
 
         let _ = store
             .insert(
@@ -240,9 +298,9 @@ mod tests {
                 &partition1,
                 &storage_key2,
                 Item {
-                        message: "test2".as_bytes().to_vec(),
-                        status: ItemStatus::Active,
-                        hlc: HLC::new(),
+                    message: "test2".as_bytes().to_vec(),
+                    status: ItemStatus::Active,
+                    hlc: HLC::new(),
                 },
             )
             .await;

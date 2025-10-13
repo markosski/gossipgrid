@@ -2,7 +2,7 @@ use crate::env::Env;
 use crate::item::ItemEntry;
 use crate::node::{self, ClusterConfig, DeltaAckState, JoinedNode, Node, NodeState, PreJoinNode};
 use crate::now_millis;
-use crate::partition::{PartitionMap, PartitionId};
+use crate::partition::{PartitionId, PartitionMap};
 use bincode::{Decode, Encode};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
@@ -37,27 +37,37 @@ pub struct GossipAck {
 pub struct GossipJoinMessage {
     pub node: Node,
     pub peer_address: String,
-    pub node_hlc: HLC
+    pub node_hlc: HLC,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct GossipSyncCheckMessage {
+    pub node: Node,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
     pub partition_item_counts: HashMap<PartitionId, usize>,
     pub all_peers: HashMap<String, Node>,
     pub node_hlc: HLC,
-    pub last_item_sync_hlc: HLC
+    pub last_item_sync_hlc: HLC,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct GossipMessage {
+    pub node: Node,
     pub cluster_config: ClusterConfig,
     pub partition_map: PartitionMap,
     pub partition_item_counts: HashMap<PartitionId, usize>,
     pub all_peers: HashMap<String, Node>,
     pub node_hlc: HLC,
-    pub items_delta: Vec<ItemEntry>
+    pub items_delta: Vec<ItemEntry>,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+enum GossipWireMessage {
+    Gossip(GossipMessage),
+    GossipJoin(GossipJoinMessage),
+    GossipAck(GossipAck),
+    GossipSyncCheck(GossipSyncCheckMessage),
 }
 
 impl HLC {
@@ -88,6 +98,18 @@ impl HLC {
                 counter: self.counter + 1,
             }
         }
+    }
+
+    /// Merge a node-level HLC and an item-level HLC, then advance (tick) the result
+    /// so the returned HLC is strictly after both inputs with respect to HLC ordering.
+    pub fn merge_and_tick(node_hlc: &HLC, item_hlc: &HLC, now: u64) -> HLC {
+        let merged = HLC::merge(node_hlc, item_hlc, now);
+        merged.tick_hlc(now)
+    }
+
+    /// Convenience: merge `self` with node_hlc and tick.
+    pub fn tick_with_node(&self, node_hlc: &HLC, now: u64) -> HLC {
+        HLC::merge_and_tick(node_hlc, self, now)
     }
 
     pub fn merge(local: &HLC, remote: &HLC, now: u64) -> HLC {
@@ -130,40 +152,52 @@ pub async fn receive_gossip(
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((size, src)) => {
-                if let Ok((message, _)) = bincode::decode_from_slice::<GossipMessage, _>(
+                if let Ok((wire, _)) = bincode::decode_from_slice::<GossipWireMessage, _>(
                     &buf[..size],
                     bincode::config::standard(),
                 ) {
-                    handle_main_message(
-                        &src,
-                        socket.clone(),
-                        message,
-                        node_state.clone(),
-                        env.clone(),
-                    )
-                    .await;
-                } else if let Ok((message, _)) = bincode::decode_from_slice::<GossipJoinMessage, _>(
-                    &buf[..size],
-                    bincode::config::standard(),
-                ) {
-                    handle_join_message(
-                        &src,
-                        socket.clone(),
-                        message,
-                        node_state.clone(),
-                        env.clone(),
-                    )
-                    .await;
-                } else if let Ok((message, _)) = bincode::decode_from_slice::<GossipAck, _>(
-                    &buf[..size],
-                    bincode::config::standard(),
-                ) {
-                    handle_item_delta_ack_message(&src, message, node_state.clone(), env.clone()).await;
-                } else if let Ok((message, _)) = bincode::decode_from_slice::<GossipSyncCheckMessage, _>(
-                    &buf[..size], 
-                    bincode::config::standard()
-                ) {
-                    handle_sync_check_message(&src, message, node_state.clone(), env.clone()).await;
+                    match wire {
+                        GossipWireMessage::Gossip(message) => {
+                            handle_main_message(
+                                &src,
+                                socket.clone(),
+                                message,
+                                node_state.clone(),
+                                env.clone(),
+                            )
+                            .await;
+                        }
+                        GossipWireMessage::GossipJoin(message) => {
+                            handle_join_message(
+                                &src,
+                                socket.clone(),
+                                message,
+                                node_state.clone(),
+                                env.clone(),
+                            )
+                            .await;
+                        }
+                        GossipWireMessage::GossipAck(message) => {
+                            handle_item_delta_ack_message(
+                                &src,
+                                message,
+                                node_state.clone(),
+                                env.clone(),
+                            )
+                            .await;
+                        }
+                        GossipWireMessage::GossipSyncCheck(message) => {
+                            handle_sync_check_message(
+                                &src,
+                                message,
+                                node_state.clone(),
+                                env.clone(),
+                            )
+                            .await;
+                        }
+                    }
+                } else {
+                    error!("Failed to decode wire message from {}", src);
                 }
             }
             Err(e) => {
@@ -187,9 +221,9 @@ pub async fn send_gossip_ack(
         &items.len()
     );
 
-    let ack = GossipAck {
+    let ack = GossipWireMessage::GossipAck(GossipAck {
         items_received: items.to_vec(),
-    };
+    });
 
     if let Ok(encoded_ack) = bincode::encode_to_vec(&ack, bincode::config::standard()) {
         match socket.send_to(&encoded_ack, &peer_addr).await {
@@ -236,7 +270,6 @@ async fn handle_join_message(
     env: Arc<Env>,
 ) {
     let mut node_state = state.write().await;
-    let mut peers = HashMap::from([(message.node.address.clone(), message.node.clone())]);
 
     info!(
         "node={}; Join Message Received {:?} from {:?}:{:?}",
@@ -268,20 +301,17 @@ async fn handle_join_message(
                 return;
             }
 
-            peers.entry(src.to_string()).and_modify(|node| {
-                node.last_seen = now_millis();
-            });
+            let peers = HashMap::from([(message.node.address.clone(), message.node.clone())]);
 
-            node.take_peers(&peers, true);
+            node.update_cluster_membership(
+                &message.node.address,
+                &peers,
+                &PartitionMap::empty(),
+                true,
+            );
 
             // Respond to join with GossipMessage
-            send_gossip_single(
-                Some(&src.to_string()),
-                socket.clone(),
-                node,
-                env.clone(),
-            )
-            .await;
+            send_gossip_single(Some(&src.to_string()), socket.clone(), node, env.clone()).await;
 
             env.get_event_publisher()
                 .publish(&crate::event::Event {
@@ -336,7 +366,8 @@ async fn handle_main_message(
     }).await;
 
     match &mut *node_state {
-        // if we are PreJoin and received a message, this means we got acknowledgement
+        // If we are PreJoin and received a message, this means we got acknowledgement
+        // At this stage we transition node to Joined state as well as inherit all cluster state information
         node::NodeState::PreJoin(node) => {
             node.node_hlc = HLC::merge(&node.node_hlc, &message.node_hlc, now_millis());
 
@@ -346,39 +377,40 @@ async fn handle_main_message(
                     message.partition_map.clone(),
                     env.get_store(),
                 )
-                .await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        error!(
-                            "node={}; Failed to transition to Joined state due to error: {}",
-                            node.get_address(),
-                            e.to_string()
-                        );
-                        return;
-                    }
-                };
-
-            let address = joined_node.address.clone();
-            let cluster_size = joined_node.cluster_config.cluster_size.clone();
-            let all_peers = message.all_peers.clone();
-
-            joined_node.take_peers(&message.all_peers, false);
+                .await
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    error!(
+                        "node={}; Failed to transition to Joined state due to error: {}",
+                        node.get_address(),
+                        e.to_string()
+                    );
+                    return;
+                }
+            };
 
             // Update partition counts
             joined_node.update_partition_counts(&node_id, message.partition_item_counts);
 
+            joined_node.update_cluster_membership(
+                &message.node.address,
+                &message.all_peers,
+                &message.partition_map,
+                false,
+            );
+
             // update node_state to joined state
             *node_state = NodeState::Joined(joined_node);
-            // drop(node_state);
 
+            let address = node_state.get_address().clone();
             env.get_event_publisher()
                 .publish(&crate::event::Event {
                     address_from: address.clone(),
                     address_to: address.clone(),
                     message_type: "Joined".to_string(),
                     data: serde_json::json!({
-                        "cluster_size": cluster_size,
-                        "peers": all_peers.keys().cloned().collect::<Vec<_>>(),
+                        "peers": message.all_peers.keys().cloned().collect::<Vec<_>>(),
                     }),
                     timestamp: now_millis(),
                 })
@@ -388,26 +420,27 @@ async fn handle_main_message(
             // Update peers to most recent timestamp and vector clock
             match message.node_hlc.compare(&node.node_hlc) {
                 Ordering::Greater | Ordering::Equal => {
-                    // TODO: ensure this is still valid, i.e. why would partition map change?
-                    let membership_changed = node.all_peers != message.all_peers;
-                    let partition_map_changed = node.partition_map != message.partition_map;
-
                     // Update partition counts
                     node.update_partition_counts(&node_id, message.partition_item_counts);
 
                     // Merge membership information
                     node.node_hlc = HLC::merge(&node.node_hlc, &message.node_hlc, now_millis());
-                    if membership_changed || partition_map_changed {
-                        node.take_peers(&message.all_peers, false);
-                        info!(
-                            "node={}; Received HLC is newer or equal to local HLC; Updated node_hlc: {:?}",
-                            &node.address, node.node_hlc
-                        );
-                    }
+
+                    node.update_cluster_membership(
+                        &message.node.address,
+                        &message.all_peers,
+                        &message.partition_map,
+                        false,
+                    );
+                    info!(
+                        "node={}; Received HLC is newer or equal to local HLC; Updated node_hlc: {:?}",
+                        &node.address, node.node_hlc
+                    );
                 }
                 Ordering::Less => {
+                    // Handle case where we received message from brand new node
                     if message.node_hlc.timestamp == 0 {
-                        node.node_hlc.tick_hlc(now_millis());
+                        node.node_hlc = node.node_hlc.tick_hlc(now_millis());
                         if let Some(src_node) = message.all_peers.get(&src.to_string()) {
                             node.add_node(src_node.clone());
                             info!("node={}; Adding new node", &node.address);
@@ -418,6 +451,15 @@ async fn handle_main_message(
                             );
                         }
                     }
+                    let peers =
+                        HashMap::from([(message.node.address.clone(), message.node.clone())]);
+                    node.update_cluster_membership(
+                        &message.node.address,
+                        &peers,
+                        &PartitionMap::empty(),
+                        false,
+                    );
+
                     info!(
                         "node={}; Received HLC is older to local HLC",
                         &node.get_address()
@@ -425,25 +467,14 @@ async fn handle_main_message(
                 }
             }
 
-            // Update partition map information. This should happen only once during cluster initialization
-            if node.partition_map.is_empty()
-                || (node.cluster_size() as usize) > message.all_peers.len()
-            {
-                // Check if we need to update the partition map
-                let mut partition_map = node.partition_map.clone();
-                partition_map.assign(&node.all_peers.keys().cloned().collect::<Vec<_>>());
-                node.node_hlc.tick_hlc(now_millis());
-
-                node.partition_map = partition_map;
-            }
-
             // Update received items and acknowledge
             // We must ensure ack is sent on every received item delta, not only new added items
             if message.items_delta.len() > 0 {
                 let items = message.items_delta.clone();
-
-                let store = env.get_store();
-                let added = node.add_items(&items, &src.to_string(), store).await;
+                let added = node
+                    .insert_items(&items, &src.to_string(), env.get_store())
+                    .await
+                    .unwrap();
 
                 if items.len() > 0 {
                     info!(
@@ -463,11 +494,24 @@ async fn handle_main_message(
                     )
                     .await;
 
-                    // Immediately forward newly received deltas to other peers so they don't
-                    // have to wait for the periodic gossip interval. We rely on the
-                    // items_delta_cache to avoid sending the delta back to the origin.
-                    // TODO: Currently this does not work well causing very chatty exchange.
-                    // send_gossip_single(None, socket.clone(), node, env.clone()).await;
+                    if added.len() > 0 {
+                        env.get_event_publisher()
+                            .publish(&crate::event::Event {
+                                address_from: node_id.clone(),
+                                address_to: node.get_address().clone(),
+                                message_type: "ItemsInserted".to_string(),
+                                data: serde_json::json!({
+                                    "inserted_count": added.len(),
+                                }),
+                                timestamp: now_millis(),
+                            })
+                            .await;
+
+                        // Immediately forward newly received deltas to other peers so they don't
+                        // have to wait for the periodic gossip interval. We rely on the
+                        // items_delta_cache to avoid sending the delta back to the origin.
+                        send_gossip_single(None, socket.clone(), node, env.clone()).await;
+                    }
                 } else {
                     debug!(
                         "node={}; No new items added from {}",
@@ -476,11 +520,6 @@ async fn handle_main_message(
                     );
                 }
             }
-
-            // bump last update time, it is important this happens after the sync
-            node.all_peers.entry(src.to_string()).and_modify(|node| {
-                node.last_seen = now_millis();
-            });
         }
         _ => {
             error!(
@@ -524,12 +563,9 @@ async fn handle_item_delta_ack_message(
             node.update_partition_counts(&node_id, HashMap::new());
 
             // TODO: ensure error here is properly handled
-            let _ = node.reconcile_delta_state(
-                &src.to_string(),
-                &message.items_received,
-                env.get_store(),
-            )
-            .await;
+            let _ = node
+                .purge_delta_state(&src.to_string(), &message.items_received, env.get_store())
+                .await;
         }
         _ => {
             error!(
@@ -602,17 +638,15 @@ pub async fn send_gossip_on_interval(
                 // Send gossip to next nodes
                 let gossip_count = this_node.gossip_count();
                 let next_nodes = this_node.next_nodes(gossip_count);
-                send_gossip_to_peers(
-                    &next_nodes,
-                    this_node,
-                    &socket,
-                    env.clone(),
-                )
-                .await;
+                send_gossip_to_peers(&next_nodes, this_node, &socket, env.clone()).await;
 
                 let node_address = this_node.get_address().clone();
 
-                info!("node={}; Node State Joined", &node_address);
+                info!(
+                    "node={}; Is cluster healthy: {}",
+                    &node_address,
+                    &this_node.is_cluster_formed()
+                );
                 info!("node={}; Node HLC", &node_address);
                 info!(
                     "node={}; Known peers: {:?}",
@@ -627,7 +661,7 @@ pub async fn send_gossip_on_interval(
                 info!(
                     "node={}; Delta Cache size: {}",
                     &node_address,
-                    &this_node.items_delta_cache.iter().count()
+                    &this_node.items_delta_origin_cache.iter().count()
                 );
                 info!(
                     "node={}; Delta State size: {}",
@@ -646,13 +680,7 @@ pub async fn send_gossip_on_interval(
             }
             node::NodeState::PreJoin(this_node) => {
                 // Send join message to the peer node
-                send_join_message(
-                    &this_node.peer_node,
-                    this_node,
-                    &socket,
-                    env.clone(),
-                )
-                .await;
+                send_join_message(&this_node.peer_node, this_node, &socket, env.clone()).await;
 
                 info!("node={}; Node PreJoin", this_node.get_address());
                 info!(
@@ -681,7 +709,7 @@ async fn send_join_message(
     socket: &UdpSocket,
     env: Arc<Env>,
 ) {
-    let msg = GossipJoinMessage {
+    let msg = GossipWireMessage::GossipJoin(GossipJoinMessage {
         node: Node {
             address: node_state.address.clone(),
             web_port: node_state.web_port.clone(),
@@ -689,7 +717,7 @@ async fn send_join_message(
         },
         peer_address: join_node.clone(),
         node_hlc: node_state.node_hlc.clone(),
-    };
+    });
 
     if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
         match socket.send_to(&encoded, &join_node).await {
@@ -730,11 +758,13 @@ async fn send_gossip_to_peers(
     env: Arc<Env>,
 ) {
     let mut all_delta_count = 0;
-
-    let node_hlc = node_state.node_hlc.clone();
+    let mut all_delta_keys = vec![];
     let mut peer_deltas = Vec::with_capacity(next_nodes.len());
-    
+    let node_hlc = node_state.node_hlc.clone();
     let store = env.get_store();
+
+    // Gather deltas for each peer we want to send to
+    // Collect all delta keys, so we can clear them if everyone has received them
     for peer_dest in next_nodes.iter() {
         let items_delta = match node_state.get_delta_for_node(peer_dest, store).await {
             Ok(delta) => delta,
@@ -748,8 +778,27 @@ async fn send_gossip_to_peers(
             }
         };
 
+        for item in items_delta.iter() {
+            all_delta_keys.push(item.storage_key.clone());
+        }
+
         all_delta_count += items_delta.len();
         peer_deltas.push((peer_dest.clone(), items_delta));
+    }
+
+    // Remove delta items if everyone we know has received them
+    if all_delta_count == 0 && !next_nodes.is_empty() {
+        match node_state
+            .clear_delta(&all_delta_keys, env.get_store())
+            .await
+        {
+            Err(err) => error!(
+                "node={}; error clearing delta: {}",
+                node_state.get_address(),
+                err.to_string()
+            ),
+            _ => {}
+        }
     }
 
     // send specific deltas to each peer
@@ -765,14 +814,15 @@ async fn send_gossip_to_peers(
 
         let partition_counts = store.partition_counts().await.unwrap_or(HashMap::new());
 
-        let msg = GossipMessage {
+        let msg = GossipWireMessage::Gossip(GossipMessage {
+            node: node_state.get_this_node(),
             cluster_config: node_state.cluster_config.clone(),
             partition_map: node_state.partition_map.clone(),
             partition_item_counts: partition_counts,
             all_peers: node_state.all_peers.clone(),
             node_hlc: node_hlc.clone(),
             items_delta: items_delta.clone(),
-        };
+        });
 
         if let Ok(encoded) = bincode::encode_to_vec(&msg, bincode::config::standard()) {
             match socket.send_to(&encoded, &peer_dest).await {
@@ -803,14 +853,6 @@ async fn send_gossip_to_peers(
             },
         );
 
-        // Remove delta items if everyone we know has received them
-        if all_delta_count == 0 && !next_nodes.is_empty() {
-            // TODO: ensure error here is properly handled
-            let _ = node_state
-                .clear_delta(env.get_store())
-                .await;
-        }
-
         env.get_event_publisher()
             .publish(&crate::event::Event {
                 address_from: node_state.get_address().clone(),
@@ -818,6 +860,7 @@ async fn send_gossip_to_peers(
                 message_type: "GossipSent".to_string(),
                 data: serde_json::json!({
                     "delta_size": items_delta.len(),
+                    "item_count": node_state.items_count(),
                     "item_ids": items_delta.iter().map(|e| e.storage_key.to_string()).collect::<Vec<_>>(),
                 }),
                 timestamp: now_millis(),

@@ -1,19 +1,16 @@
-
 pub mod transport;
 
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use crate::{gossip::HLC, partition::PartitionId};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use thiserror::Error;
 
-pub struct SyncMessage {
-
-}
+pub struct SyncMessage {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncState {
     /// HLC represent last seen item HLC
-    partitions: HashMap<PartitionId, HLC>
+    partitions: HashMap<PartitionId, HLC>,
 }
 
 #[async_trait::async_trait]
@@ -23,8 +20,8 @@ pub trait Store: Send + Sync {
     async fn clear_state() -> Result<(), SyncStoreError>;
 }
 
-#[derive(Error, Debug)]                                                   
+#[derive(Error, Debug)]
 pub enum SyncStoreError {
-    #[error("Error retrieving sync state: {0}")]                   
+    #[error("Error retrieving sync state: {0}")]
     SyncStoreOperationError(String),
 }

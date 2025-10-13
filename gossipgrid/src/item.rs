@@ -12,15 +12,12 @@ pub struct Item {
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct ItemEntry {
     pub storage_key: StorageKey,
-    pub item: Item
+    pub item: Item,
 }
 
 impl ItemEntry {
     pub fn new(storage_key: StorageKey, item: Item) -> ItemEntry {
-        ItemEntry {
-            storage_key,
-            item
-        }
+        ItemEntry { storage_key, item }
     }
 }
 
