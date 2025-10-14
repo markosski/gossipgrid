@@ -3,7 +3,7 @@ set -e
 echo "Starting cluster"
 
 # start the node and not wait for it to finish
-RUST_LOG=info cargo run cluster -s3 -r2 -p8 -w3001 &
+RUST_LOG=info cargo run cluster -s3 -r2 -p9 -w3001 &
 PID1=$!
 RUST_LOG=info cargo run join -w3002 -n4110 -a127.0.0.1:4109 &
 PID2=$!

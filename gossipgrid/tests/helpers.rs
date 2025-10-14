@@ -30,17 +30,17 @@ pub async fn start_test_cluster(
 
     let env1: Arc<Env> = Arc::new(env::Env::new(
         Box::new(InMemoryStore::new()),
-        Box::new(EventPublisherFileLogger::new("events_1.log".to_string()).await),
+        Box::new(EventPublisherFileLogger::new("events_test_1.log".to_string()).await),
     ));
 
     let env2: Arc<Env> = Arc::new(env::Env::new(
         Box::new(InMemoryStore::new()),
-        Box::new(EventPublisherFileLogger::new("events_2.log".to_string()).await),
+        Box::new(EventPublisherFileLogger::new("events_test_2.log".to_string()).await),
     ));
 
     let env3: Arc<Env> = Arc::new(env::Env::new(
         Box::new(InMemoryStore::new()),
-        Box::new(EventPublisherFileLogger::new("events_3.log".to_string()).await),
+        Box::new(EventPublisherFileLogger::new("events_test_3.log".to_string()).await),
     ));
 
     let cluster_config = ClusterConfig {
