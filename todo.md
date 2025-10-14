@@ -41,6 +41,8 @@ TODO
 * ensure when retrieving an item for VNODE we also check active Nodes 
 * delta sync
 * cluster replicas don't seem to be evenly distributed
+* separate CLI into start cluster vs create cluster commands
+    * when cluster is created we persist metadata about the cluster
 
 
 -----
