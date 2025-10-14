@@ -51,6 +51,12 @@ impl EventPublisher for EventPublisherFileLogger {
 
         if let Err(e) = file.write_all((msg_json + "\n").as_bytes()).await {
             eprintln!("Failed to write to event log file: {}", e);
+            return;
+        }
+
+        if let Err(e) = file.flush().await {
+            eprintln!("Failed to flush event log file: {}", e);
+            // continue; still attempt sync
         }
     }
 }

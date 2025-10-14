@@ -1,13 +1,15 @@
 use bincode::{Decode, Encode};
-use log::{error};
+use log::error;
 use rand::RngCore;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::node::NodeId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode, Serialize, Deserialize)]
 pub struct PartitionId(pub u16);
 impl PartitionId {
     pub fn value(self) -> u16 {
@@ -68,7 +70,6 @@ impl PartitionMap {
         self.partition_replicas.clear();
 
         for partition_id in 0..self.partition_count {
-    
             let mut hashed: BTreeMap<u64, &NodeId> = BTreeMap::new();
 
             for node in nodes {
@@ -100,17 +101,21 @@ impl PartitionMap {
     /// Route the key to one of the replicas, preferring this_node if it is one of the replicas
     pub fn route(&self, this_node: &NodeId, key: &str) -> Option<NodeId> {
         let partition = self.hash_key(key);
-        self.partition_replicas.get(&partition).and_then(|replicas| {
-            // if this_node is one of the replicas, return it
-            if replicas.contains(this_node) {
-                Some(this_node.clone())
-            } else {
-                let mut random = rand::rng();
-                replicas
-                    .get(random.next_u32() as usize % replicas.len())
-                    .cloned()
-            }
-        })
+        self.partition_replicas
+            .get(&partition)
+            .and_then(|replicas| {
+                // if this_node is one of the replicas, return it
+                if replicas.contains(this_node) {
+                    Some(this_node.clone())
+                } else {
+                    replicas.get(0).cloned()
+                    // below would return a random replica
+                    // let mut random = rand::rng();
+                    // replicas
+                    //     .get(random.next_u32() as usize % replicas.len())
+                    //     .cloned()
+                }
+            })
     }
 
     /// Check if the given partition is assigned to the given NodeId

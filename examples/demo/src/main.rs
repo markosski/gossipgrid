@@ -14,10 +14,6 @@ async fn main() {
     env_logger::init();
 
     let cli_matched = gossipgrid::cli::node_cli().get_matches();
-    let env: Arc<Env> = Arc::new(env::Env::new(
-        Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
-        Box::new(EventPublisherFileLogger::new("events_tests.log".to_string()).await),
-    ));
 
     match cli_matched.subcommand() {
         Some(("cluster", sub_matches)) => {
@@ -68,6 +64,13 @@ async fn main() {
                 Some(cluster_config),
             )));
 
+            let env: Arc<Env> = Arc::new(env::Env::new(
+                Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
+                Box::new(
+                    EventPublisherFileLogger::new(format!("events_{}.log", &local_addr)).await,
+                ),
+            ));
+
             node::start_node(web_addr, local_addr, node_memory, env).await
         }
         Some(("join", sub_matches)) => {
@@ -95,6 +98,13 @@ async fn main() {
                 Some(peer_address.clone()),
                 None,
             )));
+
+            let env: Arc<Env> = Arc::new(env::Env::new(
+                Box::new(gossipgrid::store::memory_store::InMemoryStore::new()),
+                Box::new(
+                    EventPublisherFileLogger::new(format!("events_{}.log", &local_addr)).await,
+                ),
+            ));
 
             node::start_node(web_addr, local_addr, node_memory, env).await
         }

@@ -28,9 +28,19 @@ pub async fn start_test_cluster(
     let web_port_2 = 3002;
     let web_port_3 = 3003;
 
-    let env: Arc<Env> = Arc::new(env::Env::new(
+    let env1: Arc<Env> = Arc::new(env::Env::new(
         Box::new(InMemoryStore::new()),
-        Box::new(EventPublisherFileLogger::new("events_tests.log".to_string()).await),
+        Box::new(EventPublisherFileLogger::new("events_1.log".to_string()).await),
+    ));
+
+    let env2: Arc<Env> = Arc::new(env::Env::new(
+        Box::new(InMemoryStore::new()),
+        Box::new(EventPublisherFileLogger::new("events_2.log".to_string()).await),
+    ));
+
+    let env3: Arc<Env> = Arc::new(env::Env::new(
+        Box::new(InMemoryStore::new()),
+        Box::new(EventPublisherFileLogger::new("events_3.log".to_string()).await),
     ));
 
     let cluster_config = ClusterConfig {
@@ -64,19 +74,19 @@ pub async fn start_test_cluster(
         "127.0.0.1:3001".to_string(),
         local_addr.clone(),
         node_memory_1.clone(),
-        env.clone(),
+        env1.clone(),
     ));
     let node_2 = tokio::spawn(node::start_node(
         "127.0.0.1:3002".to_string(),
         local_addr_2.clone(),
         node_memory_2.clone(),
-        env.clone(),
+        env2.clone(),
     ));
     let node_3 = tokio::spawn(node::start_node(
         "127.0.0.1:3003".to_string(),
         local_addr_3.clone(),
         node_memory_3.clone(),
-        env.clone(),
+        env3.clone(),
     ));
 
     let mut counter = 0;
