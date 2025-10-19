@@ -1,6 +1,5 @@
 use bincode::{Decode, Encode};
 use log::error;
-use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;

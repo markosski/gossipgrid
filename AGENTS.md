@@ -5,14 +5,15 @@
 - Core crate lives in `gossipgrid/`; `src/` holds modules such as `web.rs`, `gossip.rs`, and the CLI entry point `cli.rs`.
 - Shared data structures reside under `src/store/`.
 - End-to-end helpers and integration checks are in `gossipgrid/tests/`.
-- Worked examples and experimental crates live under `examples/`; visualization assets sit in `viz/`.
+- Worked examples and experimental crates live under `examples/`; 
 
 ## Build, Test, and Development Commands
 - `cargo fmt` keeps Rust sources formatted to the repo standard.
 - `cargo clippy --all-targets` runs lint checks across lib, bin, and tests.
 - `cargo test` executes unit and integration suites.
-- `RUST_LOG=info cargo run <web_port> [node_port] [seed_addr]` launches a node locally; scripts like `./start_local_cluster.sh` spin up multiple nodes.
+- scripts like `./start_local_cluster.sh` spin up multiple nodes.
 - `./simulate.sh` runs a scripted cluster scenario useful for manual verification.
+- `events_<IP>:>PORT>.log` files represent published events from each node while cluster is running
 
 ## Coding Style & Naming Conventions
 - Use Rust 2024 edition defaults: 4-space indentation, snake_case for modules/functions, CamelCase for types.

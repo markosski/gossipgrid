@@ -496,7 +496,6 @@ impl JoinedNode {
                 },
                 Duration::from_secs(DELTA_ORIGIN_CACHE_TTL_SECS),
             );
-            self.invalidate_delta_state(&storage_key_string);
 
             Ok(Some(new_entry.item.clone()))
         }
@@ -661,7 +660,7 @@ impl JoinedNode {
     /// The reason why we check each item insead of a batch of items as a whole is that we want to ensure
     /// that we only remove the items that are acknowledged by the peer and not remove items that are still pending acknowledgment,
     /// e.g. in case new itmes are added to the delta state.
-    pub async fn purge_delta_state(
+    pub async fn clear_delta_state(
         &mut self,
         from_node: &str,
         ack_delta_items: &[ItemEntry],
@@ -744,26 +743,26 @@ impl JoinedNode {
         });
     }
 
-    pub async fn clear_delta(
-        &mut self,
-        delta_ids: &[StorageKey],
-        store: &dyn Store,
-    ) -> Result<(), NodeError> {
-        if delta_ids.is_empty() {
-            store
-                .clear_all_delta()
-                .await
-                .map_err(|e| NodeError::ItemOperationError(e.to_string()))?;
-        } else {
-            for storage_key in delta_ids {
-                store
-                    .remove_from_delta(storage_key)
-                    .await
-                    .map_err(|e| NodeError::ItemOperationError(e.to_string()))?;
-            }
-        }
-        Ok(())
-    }
+    // pub async fn clear_delta(
+    //     &mut self,
+    //     delta_ids: &[StorageKey],
+    //     store: &dyn Store,
+    // ) -> Result<(), NodeError> {
+    //     if delta_ids.is_empty() {
+    //         store
+    //             .clear_all_delta()
+    //             .await
+    //             .map_err(|e| NodeError::ItemOperationError(e.to_string()))?;
+    //     } else {
+    //         for storage_key in delta_ids {
+    //             store
+    //                 .remove_from_delta(storage_key)
+    //                 .await
+    //                 .map_err(|e| NodeError::ItemOperationError(e.to_string()))?;
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
     /// Create a list of deltas that has to be send to a given node
     ///
@@ -961,7 +960,7 @@ mod tests {
 
                 // Simulate receiving acknowledgment from nodeA only
                 let _ = joined_node
-                    .purge_delta_state(&node_a, &[item1.clone()], &*store)
+                    .clear_delta_state(&node_a, &[item1.clone()], &*store)
                     .await;
 
                 // Check that delta state is cleared for nodeA but still pending for nodeB
@@ -982,7 +981,7 @@ mod tests {
 
                 // Simulate receiving acknowledgment from nodeA only and delta state should be cleared now
                 let _ = joined_node
-                    .purge_delta_state(&node_b, &[item1.clone()], &*store)
+                    .clear_delta_state(&node_b, &[item1.clone()], &*store)
                     .await;
                 let new_deltas_for_node_b = joined_node
                     .get_delta_for_node(&node_b, &*store)

@@ -469,55 +469,47 @@ async fn handle_main_message(
 
             // Update received items and acknowledge
             // We must ensure ack is sent on every received item delta, not only new added items
-            if message.items_delta.len() > 0 {
-                let items = message.items_delta.clone();
+            let items = message.items_delta.clone();
+            if items.len() > 0 {
                 let added = node
                     .insert_items(&items, &src.to_string(), env.get_store())
                     .await
                     .unwrap();
 
-                if items.len() > 0 {
-                    info!(
-                        "node={}; Added new {} items from {}, sending {} Acks",
-                        node.get_address(),
-                        added.iter().count(),
-                        &src,
-                        items.len()
-                    );
-                    send_gossip_ack(
-                        &node.get_address(),
-                        &items,
-                        &src.to_string(),
-                        &node.get_address(),
-                        socket.clone(),
-                        env.clone(),
-                    )
-                    .await;
+                info!(
+                    "node={}; Added new {} items from {}, sending {} Acks",
+                    node.get_address(),
+                    added.iter().count(),
+                    &src,
+                    items.len()
+                );
+                send_gossip_ack(
+                    &node.get_address(),
+                    &items,
+                    &src.to_string(),
+                    &node.get_address(),
+                    socket.clone(),
+                    env.clone(),
+                )
+                .await;
 
-                    if added.len() > 0 {
-                        env.get_event_publisher()
-                            .publish(&crate::event::Event {
-                                address_from: node_id.clone(),
-                                address_to: node.get_address().clone(),
-                                message_type: "ItemsInserted".to_string(),
-                                data: serde_json::json!({
-                                    "inserted_count": added.len(),
-                                }),
-                                timestamp: now_millis(),
-                            })
-                            .await;
+                if added.len() > 0 {
+                    env.get_event_publisher()
+                        .publish(&crate::event::Event {
+                            address_from: node_id.clone(),
+                            address_to: node.get_address().clone(),
+                            message_type: "ItemsInserted".to_string(),
+                            data: serde_json::json!({
+                                "inserted_count": added.len(),
+                            }),
+                            timestamp: now_millis(),
+                        })
+                        .await;
 
-                        // Immediately forward newly received deltas to other peers so they don't
-                        // have to wait for the periodic gossip interval. We rely on the
-                        // items_delta_cache to avoid sending the delta back to the origin.
-                        send_gossip_single(None, socket.clone(), node, env.clone()).await;
-                    }
-                } else {
-                    debug!(
-                        "node={}; No new items added from {}",
-                        node.get_address(),
-                        &src
-                    );
+                    // Immediately forward newly received deltas to other peers so they don't
+                    // have to wait for the periodic gossip interval. We rely on the
+                    // items_delta_cache to avoid sending the delta back to the origin.
+                    send_gossip_single(None, socket.clone(), node, env.clone()).await;
                 }
             }
         }
@@ -564,7 +556,7 @@ async fn handle_item_delta_ack_message(
 
             // TODO: ensure error here is properly handled
             let _ = node
-                .purge_delta_state(&src.to_string(), &message.items_received, env.get_store())
+                .clear_delta_state(&src.to_string(), &message.items_received, env.get_store())
                 .await;
         }
         _ => {
@@ -757,7 +749,6 @@ async fn send_gossip_to_peers(
     socket: &UdpSocket,
     env: Arc<Env>,
 ) {
-    let mut all_delta_count = 0;
     let mut all_delta_keys = vec![];
     let mut peer_deltas = Vec::with_capacity(next_nodes.len());
     let node_hlc = node_state.node_hlc.clone();
@@ -782,23 +773,7 @@ async fn send_gossip_to_peers(
             all_delta_keys.push(item.storage_key.clone());
         }
 
-        all_delta_count += items_delta.len();
         peer_deltas.push((peer_dest.clone(), items_delta));
-    }
-
-    // Remove delta items if everyone we know has received them
-    if all_delta_count == 0 && !next_nodes.is_empty() {
-        match node_state
-            .clear_delta(&all_delta_keys, env.get_store())
-            .await
-        {
-            Err(err) => error!(
-                "node={}; error clearing delta: {}",
-                node_state.get_address(),
-                err.to_string()
-            ),
-            _ => {}
-        }
     }
 
     // send specific deltas to each peer

@@ -34,12 +34,13 @@ RECENTLY DONE
     * find other places where we should first merge with node hlc for deletion 
 * nodes do not seem to converge on partition map
 * issuing insert command on existing items causes nodes to go into infinite delta send
-
-TODO
 * attemp to simplify purge_delta_state and clear_delta
     * make sure to consider situations such as concurrent updates to delta state
+
+TODO
 * separate CLI into start cluster vs create cluster commands
     * when cluster is created we persist metadata about the cluster
+    * persist partition map
 * when creating a cluster predefine a partition_map instead of re-calculating on the fly as nodes join
     * as nodes join assign partition map id to node
 * ensure when retrieving an item for VNODE we also check active Nodes 
